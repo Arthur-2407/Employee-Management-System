@@ -9,7 +9,7 @@ const router = express.Router();
 // Check-in endpoint
 router.post('/check-in', async (req, res) => {
   try {
-    const { location, imageData } = req.body;
+    const { location, imageData, idempotencyKey } = req.body;
     const employeeId = req.user.id;
 
     if (
@@ -38,25 +38,15 @@ router.post('/check-in', async (req, res) => {
 
     const { within_fence, distance, office_name } = geoFenceResult.rows[0];
 
-    // Check if already checked in today (timezone-safe using PostgreSQL CURRENT_DATE)
-    const existingCheckin = await query(
-      `SELECT id FROM attendance_records 
-       WHERE employee_id = $1 AND check_in_time >= CURRENT_DATE AND check_in_time < CURRENT_DATE + INTERVAL '1 day'`,
-      [employeeId]
-    );
-
-    if (existingCheckin.rows.length > 0) {
-      return res.status(400).json({
-        error: 'Already checked in today',
-        code: 'ALREADY_CHECKED_IN'
-      });
-    }
-
-    // Record attendance
+    // Atomic INSERT ... ON CONFLICT DO NOTHING using the unique partial index
+    // (uix_attendance_one_open_per_employee_per_day).
+    // This prevents double-check-in even with concurrent requests — the DB
+    // enforces uniqueness atomically, so the SELECT+INSERT race condition is eliminated.
     const result = await query(
-      `INSERT INTO attendance_records 
-       (employee_id, check_in_time, location, geo_fence_status, distance_from_office, check_in_image_url)
-       VALUES ($1, NOW(), POINT($2, $3), $4, $5, $6)
+      `INSERT INTO attendance_records
+         (employee_id, check_in_time, location, geo_fence_status, distance_from_office, check_in_image_url, idempotency_key)
+       VALUES ($1, NOW(), POINT($2, $3), $4, $5, $6, $7)
+       ON CONFLICT DO NOTHING
        RETURNING id, check_in_time`,
       [
         employeeId,
@@ -64,9 +54,18 @@ router.post('/check-in', async (req, res) => {
         location.longitude,
         within_fence,
         distance,
-        imageData || null
+        imageData || null,
+        idempotencyKey || null,
       ]
     );
+
+    if (result.rows.length === 0) {
+      // ON CONFLICT — already checked in
+      return res.status(409).json({
+        error: 'Already checked in today',
+        code: 'ALREADY_CHECKED_IN'
+      });
+    }
 
     // Log geo-fence violation if applicable
     if (!within_fence) {
@@ -123,6 +122,7 @@ router.post('/check-in', async (req, res) => {
   }
 });
 
+
 // Check-out endpoint
 router.post('/check-out', async (req, res) => {
   try {
@@ -155,7 +155,7 @@ router.post('/check-out', async (req, res) => {
     const seconds = totalSeconds % 60;
     const workHours = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 
-    // Update record — fix: use longitude for $5 (was latitude before)
+    // Update record with correct coordinate mapping (latitude=$4, longitude=$5)
     const result = await query(
       `UPDATE attendance_records 
        SET check_out_time = NOW(), 
@@ -167,7 +167,7 @@ router.post('/check-out', async (req, res) => {
       [
         workHours,
         imageData || null,
-        location ? location.latitude : null,
+        location ? true : null,
         location ? location.latitude : null,
         location ? location.longitude : null,
         checkinRecord.id
@@ -248,8 +248,28 @@ router.get('/history', async (req, res) => {
   try {
     const { startDate, endDate, employeeId: targetEmployeeId } = req.query;
     const requestingEmployeeId = req.user.id;
-    const isSupervisor = req.user.role === 'supervisor' || req.user.role === 'admin';
-    const isSupervisorOnly = req.user.role === 'supervisor';
+    const isAdmin = req.user.role === 'admin';
+    const isSupervisor = req.user.role === 'supervisor';
+    const isEmployee = req.user.role === 'employee';
+
+    // SCOPE VALIDATION: Supervisors can only see their assigned employees
+    // If targetEmployeeId is specified, verify supervisor assignment
+    if (targetEmployeeId && isSupervisor) {
+      const empResult = await query(
+        `SELECT id FROM supervisor_assignments 
+         WHERE supervisor_id = $1 AND employee_id IN (
+           SELECT id FROM employees WHERE employee_id = $2
+         ) AND is_active = TRUE`,
+        [req.user.id, targetEmployeeId]
+      );
+
+      if (empResult.rows.length === 0) {
+        return res.status(403).json({
+          error: 'You are not assigned to supervise this employee',
+          code: 'FORBIDDEN'
+        });
+      }
+    }
 
     let queryText = `
       SELECT ar.*, e.employee_id, e.first_name, e.last_name, e.department
@@ -274,23 +294,29 @@ router.get('/history', async (req, res) => {
       params.push(new Date(endDate));
     }
 
-    // Employee filter
-    if (targetEmployeeId && isSupervisor) {
-      paramCount++;
-      queryText += ` AND e.employee_id = $${paramCount}`;
-      params.push(targetEmployeeId);
-    } else if (!isSupervisor) {
-      // Regular employees can only see their own records
+    // ROLE-BASED SCOPE
+    if (isAdmin) {
+      // Admins see all records (no additional filter)
+    } else if (isSupervisor) {
+      if (targetEmployeeId) {
+        // Already validated above - supervisor is assigned to this employee
+        paramCount++;
+        queryText += ` AND e.employee_id = $${paramCount}`;
+        params.push(targetEmployeeId);
+      } else {
+        // Show only their assigned employees
+        paramCount++;
+        queryText += ` AND ar.employee_id IN (
+          SELECT employee_id FROM supervisor_assignments
+          WHERE supervisor_id = $${paramCount} AND is_active = TRUE
+        )`;
+        params.push(req.user.id);
+      }
+    } else if (isEmployee) {
+      // Regular employees only see their own records
       paramCount++;
       queryText += ` AND ar.employee_id = $${paramCount}`;
       params.push(requestingEmployeeId);
-    }
-
-    // Department filter for supervisors
-    if (isSupervisorOnly && req.user.department && !targetEmployeeId) {
-      paramCount++;
-      queryText += ` AND e.department = $${paramCount}`;
-      params.push(req.user.department);
     }
 
     queryText += ' ORDER BY ar.check_in_time DESC';
@@ -332,20 +358,26 @@ router.get('/history', async (req, res) => {
       countParams.push(new Date(endDate));
     }
 
-    if (targetEmployeeId && isSupervisor) {
-      countParamCount++;
-      countQuery += ` AND e.employee_id = $${countParamCount}`;
-      countParams.push(targetEmployeeId);
-    } else if (!isSupervisor) {
+    // Same scope validation
+    if (isAdmin) {
+      // Admins see all
+    } else if (isSupervisor) {
+      if (targetEmployeeId) {
+        countParamCount++;
+        countQuery += ` AND e.employee_id = $${countParamCount}`;
+        countParams.push(targetEmployeeId);
+      } else {
+        countParamCount++;
+        countQuery += ` AND ar.employee_id IN (
+          SELECT employee_id FROM supervisor_assignments
+          WHERE supervisor_id = $${countParamCount} AND is_active = TRUE
+        )`;
+        countParams.push(req.user.id);
+      }
+    } else if (isEmployee) {
       countParamCount++;
       countQuery += ` AND ar.employee_id = $${countParamCount}`;
       countParams.push(requestingEmployeeId);
-    }
-
-    if (isSupervisorOnly && req.user.department && !targetEmployeeId) {
-      countParamCount++;
-      countQuery += ` AND e.department = $${countParamCount}`;
-      countParams.push(req.user.department);
     }
 
     const countResult = await query(countQuery, countParams);

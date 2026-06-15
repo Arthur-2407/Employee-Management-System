@@ -34,11 +34,15 @@ const authRoutes = require('./modules/auth/routes');
 const attendanceRoutes = require('./modules/attendance/routes');
 const leaveRoutes = require('./modules/leave/routes');
 const workReportRoutes = require('./modules/work-report/routes');
+const reportsRoutes = require('./modules/reports/routes');
 const excelRoutes = require('./modules/excel-processing/routes');
 const notificationRoutes = require('./modules/notification/routes');
 const geofenceRoutes = require('./modules/geofence/routes');
 const securityRoutes = require('./modules/security-monitoring/routes');
 const mfaRoutes = require('./modules/auth/mfaRoutes');
+const adminRoutes = require('./modules/admin/routes');
+const locationRoutes = require('./modules/locations/routes');
+const faceManagementRoutes = require('./modules/face-management/routes');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -143,14 +147,59 @@ app.use('/api/auth', authLimiter, authRoutes);
 // Protected routes (require authentication)
 app.use('/api/attendance', authenticateToken, attendanceRoutes);
 app.use('/api/leave', authenticateToken, leaveRoutes);
+app.use('/api/reports', authenticateToken, reportsRoutes);
 app.use('/api/work-report', authenticateToken, workReportRoutes);
 app.use('/api/excel', authenticateToken, excelRoutes);
 app.use('/api/geofence', authenticateToken, geofenceRoutes);
 app.use('/api/notifications', authenticateToken, notificationRoutes);
 app.use('/api/security', authenticateToken, securityRoutes);
 
+// ADMIN MANAGEMENT ROUTES
+// WEBSITECHK_ADMIN_CONTACT: /api/admin/contact-info is a public endpoint (no auth).
+// Defined inline before the protected adminRoutes to avoid double-mounting.
+const { query: _dbQuery } = require('./config/database');
+app.get('/api/admin/contact-info', async (req, res) => {
+  try {
+    let result = null;
+    try {
+      result = await _dbQuery(
+        `SELECT ac.admin_name as name, ac.admin_email as email,
+                ac.admin_phone as phone, ac.admin_designation as designation
+         FROM admin_configuration ac
+         JOIN employees e ON ac.admin_employee_id = e.id
+         WHERE e.is_active = TRUE
+         ORDER BY ac.updated_at DESC
+         LIMIT 1`
+      );
+    } catch { /* table may not exist yet */ }
+    if (!result || result.rows.length === 0) {
+      result = await _dbQuery(
+        `SELECT CONCAT(first_name, ' ', last_name) as name, email,
+                phone_number as phone, position as designation
+         FROM employees WHERE role = 'admin' AND is_active = TRUE LIMIT 1`
+      );
+    }
+    if (!result || result.rows.length === 0) {
+      return res.json({ name: 'System Administrator', email: null, phone: null, designation: 'System Administrator', mailtoLink: null });
+    }
+    const a = result.rows[0];
+    return res.json({ name: a.name || 'System Administrator', email: a.email || null, phone: a.phone || null, designation: a.designation || 'System Administrator', mailtoLink: a.email ? `mailto:${a.email}` : null });
+  } catch (err) {
+    logger.error('Public contact-info error', { error: err.message });
+    return res.json({ name: 'System Administrator', email: null, phone: null, designation: 'System Administrator', mailtoLink: null });
+  }
+});
+app.use('/api/admin', authenticateToken, adminRoutes);
+
+
+// LOCATION MANAGEMENT ROUTES
+app.use('/api/locations', authenticateToken, locationRoutes);
+
 // V5: MFA routes (auth required)
 app.use('/api/auth/mfa', authenticateToken, mfaRoutes);
+
+// FACE MANAGEMENT & APPROVAL ROUTES
+app.use('/api', faceManagementRoutes);
 
 // V3: Telemetry and system status endpoints
 app.use('/api/telemetry', authenticateToken, telemetryRoutes);
@@ -176,7 +225,7 @@ app.get('/api/system/traces', authenticateToken, requireRole('supervisor'), (req
 
 // V8: Frontend error telemetry forwarding endpoint
 // The frontend logger (utils/logger.ts) sends errors/warnings here for centralized monitoring.
-app.post('/api/dev/frontend-error', express.json(), (req, res) => {
+function frontendErrorHandler(req, res) {
   const entry = req.body;
   if (entry && entry.level && entry.message) {
     logger.warn('[Frontend Error]', {
@@ -190,7 +239,10 @@ app.post('/api/dev/frontend-error', express.json(), (req, res) => {
     });
   }
   res.status(204).end();
-});
+}
+
+app.post('/api/dev/frontend-error', frontendErrorHandler);
+app.post('/api/api/dev/frontend-error', frontendErrorHandler);
 
 // V8: Prometheus metrics endpoint (unauthenticated for scraper access)
 // Full metrics from the Prometheus registry + collector

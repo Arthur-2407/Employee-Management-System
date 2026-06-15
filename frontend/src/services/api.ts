@@ -2,7 +2,12 @@
 import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosResponse, AxiosError } from 'axios';
 import { logger } from '@utils/logger';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+function normalizeApiBaseUrl(value?: string) {
+  const base = (value || '/api').replace(/\/+$/, '');
+  return base.endsWith('/api') ? base : `${base}/api`;
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_URL);
 
 // ────────────────────────────────────────────────────────────────
 // RESILIENCE: Serialized token refresh latch — prevents multiple
@@ -40,7 +45,7 @@ function isTransientError(error: AxiosError): boolean {
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   withCredentials: true,
-  timeout: 15000, // 15s timeout — prevents forever-hanging requests
+  timeout: 30000, // 30s timeout — prevents timeout under concurrent cold-start load
   headers: {
     'Content-Type': 'application/json',
   },

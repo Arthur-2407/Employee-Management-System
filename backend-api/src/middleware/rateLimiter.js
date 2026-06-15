@@ -17,6 +17,11 @@ const { logger } = require('../config/logger');
 
 const limiters = {};
 
+function numberFromEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function createLimiter({ windowMs = 60_000, max = 100, name = 'default', keyGenerator = null } = {}) {
   // Return cached limiter if already created with same name
   if (limiters[name]) return limiters[name];
@@ -32,8 +37,12 @@ function createLimiter({ windowMs = 60_000, max = 100, name = 'default', keyGene
       retryAfter: Math.ceil(windowMs / 1000),
     },
     keyGenerator: keyGenerator || ((req) => {
-      // Use user ID if authenticated, otherwise IP
-      return req.user?.id ? `user:${req.user.id}` : req.ip;
+      // Use user ID if authenticated, otherwise combine IP and employeeId from body/query to support NATs
+      if (req.user?.id) {
+        return `user:${req.user.id}`;
+      }
+      const employeeId = req.body?.employeeId || req.body?.employee_id || req.query?.employeeId || '';
+      return employeeId ? `${req.ip}:${employeeId}` : req.ip;
     }),
     handler: (req, res, next, options) => {
       logger.warn('[RateLimiter] Rate limit exceeded', {
@@ -45,8 +54,12 @@ function createLimiter({ windowMs = 60_000, max = 100, name = 'default', keyGene
       res.status(429).json(options.message);
     },
     skip: (req) => {
-      // Skip rate limiting for health checks
-      return req.url === '/health';
+      const url = req.originalUrl || req.url;
+      // Skip rate limiting for health and status checks.
+      return url === '/health'
+        || url === '/api/system/status'
+        || url === '/api/dev/frontend-error'
+        || url === '/api/api/dev/frontend-error';
     },
   });
 
@@ -55,8 +68,20 @@ function createLimiter({ windowMs = 60_000, max = 100, name = 'default', keyGene
 }
 
 // Pre-built limiters
-const authLimiter = createLimiter({ windowMs: 60_000, max: 5, name: 'auth' });
-const apiLimiter = createLimiter({ windowMs: 60_000, max: 100, name: 'api' });
-const uploadLimiter = createLimiter({ windowMs: 60_000, max: 10, name: 'upload' });
+const authLimiter = createLimiter({
+  windowMs: numberFromEnv('AUTH_RATE_LIMIT_WINDOW_MS', 60_000),
+  max: numberFromEnv('AUTH_RATE_LIMIT_MAX_REQUESTS', 60),
+  name: 'auth',
+});
+const apiLimiter = createLimiter({
+  windowMs: numberFromEnv('RATE_LIMIT_WINDOW_MS', 60_000),
+  max: numberFromEnv('RATE_LIMIT_MAX_REQUESTS', 300),
+  name: 'api',
+});
+const uploadLimiter = createLimiter({
+  windowMs: numberFromEnv('UPLOAD_RATE_LIMIT_WINDOW_MS', 60_000),
+  max: numberFromEnv('UPLOAD_RATE_LIMIT_MAX_REQUESTS', 10),
+  name: 'upload',
+});
 
 module.exports = { createLimiter, authLimiter, apiLimiter, uploadLimiter };
