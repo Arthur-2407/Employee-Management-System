@@ -15,6 +15,8 @@ export interface LeaveRequest {
   rejection_reason: string | null;
   created_at: string;
   updated_at: string;
+  attachment_data?: string | null;
+  attachment_name?: string | null;
   employee?: {
     employee_id: string;
     first_name: string;
@@ -33,6 +35,8 @@ export interface LeaveRequestData {
   startDate: string;
   endDate: string;
   reason: string;
+  attachmentData?: string | null;
+  attachmentName?: string | null;
 }
 
 export interface LeaveStats {
@@ -42,6 +46,9 @@ export interface LeaveStats {
   rejected: number;
   vacationDaysUsed: number;
   sickDaysUsed: number;
+  personalDaysUsed: number;
+  maternityDaysUsed: number;
+  paternityDaysUsed: number;
 }
 
 export const leaveApi = {

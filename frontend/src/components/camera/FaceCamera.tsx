@@ -60,7 +60,6 @@ const FaceCamera = ({
     return () => {
       stopCameraRef.current();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps — only run on mount/unmount
   }, []);
 
   // Setup video stream

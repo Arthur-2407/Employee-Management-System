@@ -95,8 +95,36 @@ export const attendanceApi = {
     return response;
   },
 
-  getMyTiming: async (): Promise<AxiosResponse<{ success: boolean; work_start_time: string; work_end_time: string; has_assigned_timing: boolean }>> => {
+  getMyTiming: async (): Promise<AxiosResponse<{
+    success: boolean;
+    work_start_time: string;
+    work_end_time: string;
+    has_assigned_timing: boolean;
+    is_temporary: boolean;
+    start_date: string | null;
+    end_date: string | null;
+    location_name: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    radius_meters: number | null;
+    has_assigned_location: boolean;
+  }>> => {
     const response = await api.get('/attendance/my-timing');
     return response;
+  },
+
+  requestLocationTiming: async (data: {
+    requestType: 'location' | 'timing' | 'both';
+    requestedLocationName?: string;
+    requestedLatitude?: number;
+    requestedLongitude?: number;
+    requestedRadiusMeters?: number;
+    requestedWorkStartTime?: string;
+    requestedWorkEndTime?: string;
+    requestedIsTemporary?: boolean;
+    requestedStartDate?: string | null;
+    requestedEndDate?: string | null;
+  }): Promise<AxiosResponse<{ success: boolean; message: string; data: any }>> => {
+    return api.post('/attendance/request-location-timing', data);
   },
 };

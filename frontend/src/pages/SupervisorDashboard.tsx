@@ -60,6 +60,9 @@ interface TeamAttendance {
   check_in_time: string;
   check_out_time: string | null;
   geo_fence_status: boolean;
+  distance_from_office?: number | null;
+  checkout_geo_fence_status?: boolean | null;
+  checkout_distance_from_office?: number | null;
   employee?: {
     employee_id: string;
     first_name: string;
@@ -84,6 +87,7 @@ const SupervisorDashboard: React.FC = () => {
   const [rejectingLeaveId, setRejectingLeaveId] = useState<number | null>(null);
   const [leaveActionReason, setLeaveActionReason] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [previewAttachment, setPreviewAttachment] = useState<{ data: string; name: string } | null>(null);
   const [showTeamModal, setShowTeamModal] = useState(false);
   const [showPresentModal, setShowPresentModal] = useState(false);
   const [showPendingLeaveModal, setShowPendingLeaveModal] = useState(false);
@@ -223,11 +227,14 @@ const SupervisorDashboard: React.FC = () => {
             check_in_time: record.check_in_time,
             check_out_time: record.check_out_time,
             geo_fence_status: record.geo_fence_status,
+            distance_from_office: record.distance_from_office,
+            checkout_geo_fence_status: record.checkout_geo_fence_status,
+            checkout_distance_from_office: record.checkout_distance_from_office,
             employee: {
-              employee_id: record.employee_id,
-              first_name: record.first_name,
-              last_name: record.last_name,
-              department: record.department,
+              employee_id: record.employee?.employee_id || record.employee_id || '',
+              first_name: record.employee?.first_name || record.first_name || '',
+              last_name: record.employee?.last_name || record.last_name || '',
+              department: record.employee?.department || record.department || '',
             },
           }))
         );
@@ -294,6 +301,15 @@ const SupervisorDashboard: React.FC = () => {
       websocketService.off('system_notification', handleRealtimeUpdate);
     };
   }, [fetchData]);
+
+  // Format geo-fence distance helper
+  const formatDistance = (dist: number | null | undefined) => {
+    if (dist === null || dist === undefined) return '—';
+    if (dist < 1000) {
+      return `${Math.round(dist)}m`;
+    }
+    return `${(dist / 1000).toFixed(2)}km`;
+  };
 
   // Get event type icon
   const getEventTypeIcon = (type: string) => {
@@ -651,6 +667,14 @@ const SupervisorDashboard: React.FC = () => {
                   </div>
                   
                   <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-3">
+                    {request.attachment_data && (
+                      <button
+                        onClick={() => setPreviewAttachment({ data: request.attachment_data!, name: request.attachment_name || 'attachment' })}
+                        className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors"
+                      >
+                        View Attachment
+                      </button>
+                    )}
                     {rejectingLeaveId === request.id ? (
                       <div className="flex flex-col space-y-2 w-full sm:w-64">
                         <input
@@ -835,7 +859,7 @@ const SupervisorDashboard: React.FC = () => {
                       Department
                     </th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Check-in Time
+                      Check-in & Check-out
                     </th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Status
@@ -849,18 +873,19 @@ const SupervisorDashboard: React.FC = () => {
                   {teamAttendance.map((attendance) => (
                     <motion.tr 
                       key={attendance.id}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ duration: 0.3 }}
-                      className="hover:bg-gray-50"
+                      whileHover={{ scale: 1.005, backgroundColor: '#f9fafb' }}
+                      initial={{ opacity: 0, y: 5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2 }}
+                      className="transition-colors border-l-4 border-transparent hover:border-blue-500"
                     >
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         {attendance.employee ? (
                           <div>
-                            <div className="font-medium">
+                            <div className="font-semibold text-gray-900">
                               {attendance.employee.first_name} {attendance.employee.last_name}
                             </div>
-                            <div className="text-gray-500 text-xs">
+                            <div className="text-gray-500 text-xs font-mono mt-0.5">
                               {attendance.employee.employee_id}
                             </div>
                           </div>
@@ -868,33 +893,85 @@ const SupervisorDashboard: React.FC = () => {
                           'Unknown'
                         )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-medium">
                         {attendance.employee?.department || '-'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {new Date(attendance.check_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        <div className="flex flex-col space-y-1">
+                          <div className="flex items-center text-xs text-gray-500">
+                            <span className="w-8 font-semibold text-blue-600 bg-blue-50 px-1 py-0.5 rounded text-center mr-2 scale-90">IN</span>
+                            <span className="font-medium text-gray-800">
+                              {new Date(attendance.check_in_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          <div className="flex items-center text-xs text-gray-500">
+                            <span className="w-8 font-semibold text-green-600 bg-green-50 px-1 py-0.5 rounded text-center mr-2 scale-90">OUT</span>
+                            <span className="font-medium text-gray-800">
+                              {attendance.check_out_time ? (
+                                new Date(attendance.check_out_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                              ) : (
+                                <span className="text-3xs italic text-amber-500 font-bold bg-amber-50 px-1.5 py-0.5 rounded uppercase tracking-wider">Active</span>
+                              )}
+                            </span>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {attendance.check_out_time ? (
-                          <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">
-                            Checked Out
-                          </span>
-                        ) : (
-                          <span className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">
-                            Present
-                          </span>
-                        )}
+                        <div className="flex flex-col space-y-1.5">
+                          <div className="flex items-center">
+                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 mr-2" />
+                            <span className="text-2xs font-bold uppercase tracking-wider text-blue-600">Checked In</span>
+                          </div>
+                          <div className="flex items-center">
+                            <span className={`inline-block w-1.5 h-1.5 rounded-full mr-2 ${attendance.check_out_time ? 'bg-green-500' : 'bg-gray-300'}`} />
+                            <span className={`text-2xs font-bold uppercase tracking-wider ${attendance.check_out_time ? 'text-green-600' : 'text-gray-400'}`}>
+                              {attendance.check_out_time ? 'Checked Out' : 'Active'}
+                            </span>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {attendance.geo_fence_status ? (
-                          <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">
-                            Within Fence
-                          </span>
-                        ) : (
-                          <span className="px-2 py-1 text-xs rounded-full bg-red-100 text-red-800">
-                            Outside Fence
-                          </span>
-                        )}
+                        <div className="flex flex-col space-y-1">
+                          {/* Check-in Geo-fence status */}
+                          <div className="flex items-center justify-between min-w-[120px]">
+                            <span className={`px-2 py-0.5 text-3xs font-bold rounded-full uppercase tracking-wider ${
+                              attendance.geo_fence_status 
+                                ? 'bg-green-50 text-green-700 border border-green-200' 
+                                : 'bg-red-50 text-red-600 border border-red-150'
+                            }`}>
+                              {attendance.geo_fence_status ? 'Within' : 'Outside'}
+                            </span>
+                            <span className="text-2xs text-gray-500 font-mono font-medium ml-2">
+                              {attendance.distance_from_office !== null && attendance.distance_from_office !== undefined
+                                ? `(${formatDistance(attendance.distance_from_office)})`
+                                : '(No data)'}
+                            </span>
+                          </div>
+                          {/* Check-out Geo-fence status */}
+                          <div className="flex items-center justify-between min-w-[120px]">
+                            {attendance.check_out_time ? (
+                              <>
+                                <span className={`px-2 py-0.5 text-3xs font-bold rounded-full uppercase tracking-wider ${
+                                  attendance.checkout_geo_fence_status 
+                                    ? 'bg-green-50 text-green-700 border border-green-200' 
+                                    : 'bg-red-50 text-red-600 border border-red-150'
+                                }`}>
+                                  {attendance.checkout_geo_fence_status ? 'Within' : 'Outside'}
+                                </span>
+                                <span className="text-2xs text-gray-500 font-mono font-medium ml-2">
+                                  {attendance.checkout_distance_from_office !== null && attendance.checkout_distance_from_office !== undefined
+                                    ? `(${formatDistance(attendance.checkout_distance_from_office)})`
+                                    : '(No data)'}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="px-2 py-0.5 text-3xs font-bold rounded-full bg-gray-50 text-gray-400 border border-gray-150 uppercase tracking-wider">Pending</span>
+                                <span className="text-2xs text-gray-300 font-mono ml-2">—</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
                       </td>
                     </motion.tr>
                   ))}
@@ -1128,6 +1205,9 @@ const SupervisorDashboard: React.FC = () => {
                         Reason
                       </th>
                       <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Attachment
+                      </th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Submitted On
                       </th>
                     </tr>
@@ -1154,6 +1234,18 @@ const SupervisorDashboard: React.FC = () => {
                           {request.reason}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {request.attachment_data ? (
+                            <button
+                              onClick={() => setPreviewAttachment({ data: request.attachment_data!, name: request.attachment_name || 'attachment' })}
+                              className="text-blue-600 hover:text-blue-800 font-semibold"
+                            >
+                              View
+                            </button>
+                          ) : (
+                            'None'
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           {new Date(request.created_at).toLocaleDateString()}
                         </td>
                       </tr>
@@ -1167,6 +1259,51 @@ const SupervisorDashboard: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowPendingLeaveModal(false)}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors font-medium text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Attachment Preview Modal */}
+      {previewAttachment && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-70 p-4">
+          <div className="bg-white rounded-2xl max-w-4xl w-full p-6 shadow-2xl relative max-h-[90vh] flex flex-col animate-in fade-in zoom-in duration-200">
+            <div className="flex justify-between items-center pb-4 border-b border-gray-200">
+              <h3 className="text-xl font-bold text-gray-800 truncate">
+                Attachment: {previewAttachment.name}
+              </h3>
+              <button
+                onClick={() => setPreviewAttachment(null)}
+                className="text-gray-500 hover:text-gray-700 text-2xl font-semibold focus:outline-none"
+              >
+                &times;
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-auto my-4 flex items-center justify-center bg-gray-50 rounded-lg p-2 min-h-[50vh]">
+              {previewAttachment.data.startsWith('data:application/pdf') || previewAttachment.name.toLowerCase().endsWith('.pdf') ? (
+                <iframe
+                  src={previewAttachment.data}
+                  className="w-full h-[65vh] border-0 rounded-lg"
+                  title="PDF Document Viewer"
+                />
+              ) : (
+                <img
+                  src={previewAttachment.data}
+                  alt="Attachment Preview"
+                  className="max-w-full max-h-[65vh] object-contain rounded-lg shadow"
+                />
+              )}
+            </div>
+            
+            <div className="flex justify-end pt-4 border-t border-gray-200">
+              <button
+                type="button"
+                onClick={() => setPreviewAttachment(null)}
                 className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors font-medium text-sm"
               >
                 Close

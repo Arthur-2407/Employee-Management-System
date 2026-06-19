@@ -74,7 +74,6 @@ const AttendancePage: React.FC = () => {
 
     doFetchRecords();
     return () => { abortController.abort(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateRange]);
 
   // STABILIZATION: Today's status fetch with AbortController

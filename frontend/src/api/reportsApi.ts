@@ -47,4 +47,39 @@ export const reportsApi = {
     const response = await api.get<ReportsResponse>('/reports', { params: { period } });
     return response;
   },
+
+  getAttendanceReport: async (params: { startDate?: string; endDate?: string; employeeId?: string; limit?: number; offset?: number }): Promise<AxiosResponse<{ success: boolean; count: number; data: any[] }>> => {
+    const response = await api.get('/reports/attendance', { params });
+    return response;
+  },
+
+  getManagedEmployees: async (): Promise<AxiosResponse<{ success: boolean; data: any[] }>> => {
+    const response = await api.get('/reports/managed-employees');
+    return response;
+  },
+
+  downloadAttendanceExcel: async (params: { startDate?: string; endDate?: string; department?: string; employeeId?: string }): Promise<AxiosResponse<Blob>> => {
+    const response = await api.get('/excel/attendance', {
+      params: {
+        start_date: params.startDate,
+        end_date: params.endDate,
+        department: params.department,
+        employee_id: params.employeeId,
+      },
+      responseType: 'blob'
+    });
+    return response;
+  },
+
+  downloadLeaveExcel: async (params: { startDate?: string; endDate?: string; employeeId?: string }): Promise<AxiosResponse<Blob>> => {
+    const response = await api.get('/excel/leave', {
+      params: {
+        start_date: params.startDate,
+        end_date: params.endDate,
+        employee_id: params.employeeId,
+      },
+      responseType: 'blob'
+    });
+    return response;
+  },
 };

@@ -116,7 +116,36 @@ const DashboardPage: React.FC = () => {
   // Interactive Stats Modal States
   const [activeModal, setActiveModal] = useState<'checkins' | 'hours' | 'compliance' | 'late' | null>(null);
   const [historyRecords, setHistoryRecords] = useState<any[]>([]);
-  const [myTiming, setMyTiming] = useState<{ work_start_time: string; work_end_time: string; has_assigned_timing: boolean } | null>(null);
+  const [myTiming, setMyTiming] = useState<{
+    work_start_time: string;
+    work_end_time: string;
+    has_assigned_timing: boolean;
+    is_temporary?: boolean;
+    start_date?: string | null;
+    end_date?: string | null;
+    location_name?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    radius_meters?: number | null;
+    has_assigned_location?: boolean;
+  } | null>(null);
+
+  const [countdown, setCountdown] = useState<{ days: number; hours: number; minutes: number; seconds: number } | null>(null);
+
+  // Request Modal States
+  const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
+  const [requestType, setRequestType] = useState<'location' | 'timing' | 'both'>('both');
+  const [reqLocName, setReqLocName] = useState('');
+  const [reqLat, setReqLat] = useState('');
+  const [reqLng, setReqLng] = useState('');
+  const [reqRadius, setReqRadius] = useState('500');
+  const [reqStartTime, setReqStartTime] = useState('09:00');
+  const [reqEndTime, setReqEndTime] = useState('18:00');
+  const [reqIsTemp, setReqIsTemp] = useState(false);
+  const [reqStartDate, setReqStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [reqEndDate, setReqEndDate] = useState(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
+  const [requestSubmitting, setRequestSubmitting] = useState(false);
+
   const [expandedDate, setExpandedDate] = useState<string | null>(null);
 
   // Helper to compute Mon-Sat bounds for a given week offset (0 = current week, 1 = 1 week ago, etc.)
@@ -430,6 +459,139 @@ const DashboardPage: React.FC = () => {
     });
   }, [historyRecords, myTiming]);
 
+  const fetchMyTimingSilently = async () => {
+    try {
+      const resp = await attendanceApi.getMyTiming();
+      setMyTiming(resp.data);
+    } catch (err) {
+      console.error('Silent timing refetch error:', err);
+    }
+  };
+
+  // Live countdown timer for temporary timing
+  useEffect(() => {
+    if (!myTiming || !myTiming.is_temporary || !myTiming.end_date) {
+      setCountdown(null);
+      return;
+    }
+
+    const updateTimer = () => {
+      // Parse YYYY-MM-DD manually to avoid browser timezone quirks
+      const parts = myTiming.end_date!.split('T')[0].split('-');
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1; // 0-based month
+      const day = parseInt(parts[2], 10);
+      const endDate = new Date(year, month, day, 23, 59, 59, 999);
+      
+      const diffMs = endDate.getTime() - Date.now();
+      if (diffMs <= 0) {
+        setCountdown(null);
+        // Expired! Trigger a silent timing fetch to revert the timing
+        void fetchMyTimingSilently();
+      } else {
+        const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
+        setCountdown({ days, hours, minutes, seconds });
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [myTiming]);
+
+  // Real-time location and timing WebSocket listeners
+  useEffect(() => {
+    const handleLocationTimingUpdate = (data: any) => {
+      console.log('[WS] Location/Timing update received:', data);
+      void fetchMyTimingSilently();
+      // Also trigger a refresh of stats/dashboard data
+      const abortController = new AbortController();
+      fetchDashboardData(abortController.signal);
+    };
+
+    websocketService.on('location_timing_update', handleLocationTimingUpdate);
+    websocketService.on('location_timing_request_updated', handleLocationTimingUpdate);
+
+    return () => {
+      websocketService.off('location_timing_update', handleLocationTimingUpdate);
+      websocketService.off('location_timing_request_updated', handleLocationTimingUpdate);
+    };
+  }, []);
+
+  const handleRequestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (user?.role === 'admin') {
+      showError('Administrators cannot submit requests');
+      return;
+    }
+
+    setRequestSubmitting(true);
+    try {
+      const payload: any = {
+        requestType,
+      };
+
+      if (requestType === 'location' || requestType === 'both') {
+        if (!reqLocName.trim()) {
+          showError('Location Name is required');
+          setRequestSubmitting(false);
+          return;
+        }
+        const lat = parseFloat(reqLat);
+        const lng = parseFloat(reqLng);
+        if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+          showError('Please enter valid coordinates');
+          setRequestSubmitting(false);
+          return;
+        }
+        payload.requestedLocationName = reqLocName.trim();
+        payload.requestedLatitude = lat;
+        payload.requestedLongitude = lng;
+        payload.requestedRadiusMeters = parseInt(reqRadius, 10) || 500;
+      }
+
+      if (requestType === 'timing' || requestType === 'both') {
+        if (!reqStartTime || !reqEndTime) {
+          showError('Work start and end times are required');
+          setRequestSubmitting(false);
+          return;
+        }
+        payload.requestedWorkStartTime = reqStartTime.includes(':') && reqStartTime.split(':').length === 2 ? `${reqStartTime}:00` : reqStartTime;
+        payload.requestedWorkEndTime = reqEndTime.includes(':') && reqEndTime.split(':').length === 2 ? `${reqEndTime}:00` : reqEndTime;
+        payload.requestedIsTemporary = reqIsTemp;
+        if (reqIsTemp) {
+          if (!reqStartDate || !reqEndDate) {
+            showError('Start and end dates are required for temporary timings');
+            setRequestSubmitting(false);
+            return;
+          }
+          payload.requestedStartDate = reqStartDate;
+          payload.requestedEndDate = reqEndDate;
+        }
+      }
+
+      const res = await attendanceApi.requestLocationTiming(payload);
+      if (res.data.success || res.status === 201) {
+        showSuccess('Location/Timing request submitted successfully!');
+        setIsRequestModalOpen(false);
+        // Reset form
+        setReqLocName('');
+        setReqLat('');
+        setReqLng('');
+        setReqRadius('500');
+        setReqIsTemp(false);
+      }
+    } catch (err: any) {
+      console.error(err);
+      showError(err.response?.data?.error || 'Failed to submit request');
+    } finally {
+      setRequestSubmitting(false);
+    }
+  };
+
   // Fetch dashboard data
   useEffect(() => {
     const abortController = new AbortController();
@@ -447,7 +609,6 @@ const DashboardPage: React.FC = () => {
       abortController.abort();
       clearInterval(refreshTimer);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.role]);
 
   // STABILIZATION: Loading timeout safety nets — auto-resolve after 15s
@@ -562,7 +723,7 @@ const DashboardPage: React.FC = () => {
           <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-gray-600 mt-1">Welcome back, {(user as any)?.firstName ?? ''} {(user as any)?.lastName ?? ''}</p>
           {user && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-sm text-gray-500">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2 text-sm text-gray-500">
               <span><strong>ID:</strong> {user.employeeId}</span>
               <span className="text-gray-300">•</span>
               <span><strong>Department:</strong> {user.department}</span>
@@ -577,6 +738,44 @@ const DashboardPage: React.FC = () => {
                       <span className="text-amber-500 italic">Unassigned</span>
                     )}
                   </span>
+                </>
+              )}
+              <span className="text-gray-300">•</span>
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${myTiming?.is_temporary ? 'bg-amber-100 text-amber-800 border border-amber-200 animate-pulse' : 'bg-blue-50 text-blue-800 border border-blue-100'}`}>
+                <strong>Work Timings:</strong> {myTiming ? `${myTiming.work_start_time.substring(0, 5)} - ${myTiming.work_end_time.substring(0, 5)}` : '09:00 - 18:00'}
+                {myTiming?.is_temporary && (
+                  <span className="ml-1 text-[11px] text-amber-700 font-mono">
+                    (Temp: {myTiming.start_date ? new Date(myTiming.start_date).toLocaleDateString() : ''} - {myTiming.end_date ? new Date(myTiming.end_date).toLocaleDateString() : ''}
+                    {countdown ? ` | ${countdown.days}d ${countdown.hours}h ${countdown.minutes}m ${countdown.seconds}s left` : ''})
+                  </span>
+                )}
+              </span>
+              <span className="text-gray-300">•</span>
+              <span className="inline-flex items-center gap-1.5">
+                <strong>Work Location:</strong>{' '}
+                {myTiming?.has_assigned_location && myTiming.latitude && myTiming.longitude ? (
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${myTiming.latitude},${myTiming.longitude}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-green-600 hover:text-green-800 font-semibold underline inline-flex items-center gap-1"
+                  >
+                    <FaMapMarkerAlt /> {myTiming.location_name || 'Assigned Location'}
+                  </a>
+                ) : (
+                  <span className="text-gray-500 italic">Global Office (Default)</span>
+                )}
+              </span>
+
+              {user.role !== 'admin' && (
+                <>
+                  <span className="text-gray-300">•</span>
+                  <button
+                    onClick={() => setIsRequestModalOpen(true)}
+                    className="px-2.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs rounded-full shadow-sm hover:shadow transition-all"
+                  >
+                    Request Location/Timing
+                  </button>
                 </>
               )}
             </div>
@@ -1406,6 +1605,178 @@ const DashboardPage: React.FC = () => {
                   Close
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Location & Timing Request Modal */}
+      <AnimatePresence>
+        {isRequestModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50 overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-lg overflow-hidden flex flex-col my-8"
+            >
+              <div className="flex justify-between items-center bg-gray-50 px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-bold text-gray-900">Request Work Location / Timing Change</h3>
+                <button
+                  onClick={() => setIsRequestModalOpen(false)}
+                  className="text-gray-400 hover:text-gray-600 transition-colors text-2xl"
+                >
+                  &times;
+                </button>
+              </div>
+
+              <form onSubmit={handleRequestSubmit} className="p-6 space-y-4 overflow-y-auto max-h-[75vh]">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">Request Type</label>
+                  <select
+                    value={requestType}
+                    onChange={(e) => setRequestType(e.target.value as any)}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="both">Both Location & Timing</option>
+                    <option value="location">Work Location Only</option>
+                    <option value="timing">Work Timing Only</option>
+                  </select>
+                </div>
+
+                {/* Location Section */}
+                {(requestType === 'location' || requestType === 'both') && (
+                  <div className="space-y-3 p-4 bg-green-50/50 rounded-xl border border-green-100">
+                    <h4 className="text-sm font-bold text-green-800">Requested Work Location Details</h4>
+                    
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Location Name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g., Home Office, Client Site"
+                        value={reqLocName}
+                        onChange={(e) => setReqLocName(e.target.value)}
+                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Latitude</label>
+                        <input
+                          type="number"
+                          step="0.000001"
+                          placeholder="e.g. 20.35412"
+                          value={reqLat}
+                          onChange={(e) => setReqLat(e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-green-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Longitude</label>
+                        <input
+                          type="number"
+                          step="0.000001"
+                          placeholder="e.g. 85.83125"
+                          value={reqLng}
+                          onChange={(e) => setReqLng(e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-green-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Radius (Meters)</label>
+                      <input
+                        type="number"
+                        placeholder="500"
+                        value={reqRadius}
+                        onChange={(e) => setReqRadius(e.target.value)}
+                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Timing Section */}
+                {(requestType === 'timing' || requestType === 'both') && (
+                  <div className="space-y-3 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
+                    <h4 className="text-sm font-bold text-blue-800">Requested Work Timing Details</h4>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Start Time</label>
+                        <input
+                          type="time"
+                          value={reqStartTime}
+                          onChange={(e) => setReqStartTime(e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">End Time</label>
+                        <input
+                          type="time"
+                          value={reqEndTime}
+                          onChange={(e) => setReqEndTime(e.target.value)}
+                          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 py-1">
+                      <input
+                        id="req-is-temp"
+                        type="checkbox"
+                        checked={reqIsTemp}
+                        onChange={(e) => setReqIsTemp(e.target.checked)}
+                        className="h-4 w-4 text-blue-600 border-gray-350 rounded focus:ring-blue-500"
+                      />
+                      <label htmlFor="req-is-temp" className="text-xs font-semibold text-gray-750">Is this a Temporary Timing?</label>
+                    </div>
+
+                    {reqIsTemp && (
+                      <div className="grid grid-cols-2 gap-3 pt-1">
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-700 mb-1">Start Date</label>
+                          <input
+                            type="date"
+                            value={reqStartDate}
+                            onChange={(e) => setReqStartDate(e.target.value)}
+                            className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-700 mb-1">End Date</label>
+                          <input
+                            type="date"
+                            value={reqEndDate}
+                            onChange={(e) => setReqEndDate(e.target.value)}
+                            className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setIsRequestModalOpen(false)}
+                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={requestSubmitting}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white rounded-lg text-sm font-semibold shadow"
+                  >
+                    {requestSubmitting ? 'Submitting...' : 'Submit Request'}
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}

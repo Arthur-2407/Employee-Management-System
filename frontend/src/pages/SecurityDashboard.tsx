@@ -129,7 +129,6 @@ const SecurityDashboard: React.FC = () => {
       abortController.abort();
       clearTimeout(loadingTimeout);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps — showError is a stable context ref
   }, []);
 
   // Get event type icon

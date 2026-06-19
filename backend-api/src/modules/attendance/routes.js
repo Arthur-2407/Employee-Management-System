@@ -96,6 +96,32 @@ router.post('/check-in', async (req, res) => {
 
     const { within_fence, distance, office_name } = geoFenceData;
 
+    // Security check: Reject check-in if user is outside the assigned location radius, EXCEPT if employeeId is 'admin'
+    if (req.user?.employeeId !== 'admin' && !within_fence) {
+      try {
+        await logSecurityEvent({
+          employeeId: req.user.employeeId,
+          eventType: 'GEOFENCE_VIOLATION',
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent'],
+          details: JSON.stringify({
+            distance: distance,
+            office: office_name,
+            location: location,
+            action: 'check-in-rejected'
+          }),
+          severity: 'high'
+        });
+      } catch (logErr) {
+        logger.warn('Failed to log geofence violation event', { error: logErr.message });
+      }
+
+      return res.status(400).json({
+        error: 'You are outside the geofence radius. Check-in is rejected.',
+        code: 'OUTSIDE_GEOFENCE'
+      });
+    }
+
     // Atomic INSERT ... ON CONFLICT DO NOTHING using the unique partial index
     // (uix_attendance_one_open_per_employee_per_day).
     // This prevents double-check-in even with concurrent requests — the DB
@@ -413,13 +439,14 @@ router.get('/today', async (req, res) => {
   }
 });
 
-// Get current employee's work timings
+// Get current employee's work timings & location
 router.get('/my-timing', async (req, res) => {
   try {
     const employeeId = req.user.id;
+
     // Check temporary timings first
     const tempShiftResult = await query(
-      `SELECT work_start_time, work_end_time 
+      `SELECT work_start_time, work_end_time, is_temporary, start_date, end_date
        FROM work_timings
        WHERE employee_id = $1 
          AND is_temporary = TRUE 
@@ -436,7 +463,7 @@ router.get('/my-timing', async (req, res) => {
     } else {
       // Query active permanent timing
       const permShiftResult = await query(
-        `SELECT work_start_time, work_end_time 
+        `SELECT work_start_time, work_end_time, is_temporary, start_date, end_date
          FROM work_timings
          WHERE employee_id = $1 
            AND is_temporary = FALSE 
@@ -449,18 +476,128 @@ router.get('/my-timing', async (req, res) => {
       }
     }
 
+    // Query active custom location
+    const locResult = await query(
+      `SELECT name, latitude, longitude, radius_meters 
+       FROM employee_locations 
+       WHERE employee_id = $1 AND is_active = TRUE
+       LIMIT 1`,
+      [employeeId]
+    );
+
     const workStartTime = shift ? shift.work_start_time : '09:00:00';
     const workEndTime = shift ? shift.work_end_time : '18:00:00';
+    const assignedLocation = locResult.rows.length > 0 ? locResult.rows[0] : null;
 
     res.json({
       success: true,
       work_start_time: workStartTime,
       work_end_time: workEndTime,
-      has_assigned_timing: shift !== null
+      has_assigned_timing: shift !== null,
+      is_temporary: shift ? shift.is_temporary : false,
+      start_date: shift ? shift.start_date : null,
+      end_date: shift ? shift.end_date : null,
+      location_name: assignedLocation ? assignedLocation.name : null,
+      latitude: assignedLocation ? assignedLocation.latitude : null,
+      longitude: assignedLocation ? assignedLocation.longitude : null,
+      radius_meters: assignedLocation ? assignedLocation.radius_meters : null,
+      has_assigned_location: assignedLocation !== null
     });
   } catch (error) {
     logger.error('Failed to get employee work timings', { error: error.message });
     res.status(500).json({ error: 'Failed to fetch work timings' });
+  }
+});
+
+// Submit location or timing request to admin
+router.post('/request-location-timing', async (req, res) => {
+  try {
+    const employeeId = req.user.id;
+    const {
+      requestType,
+      requestedLocationName,
+      requestedLatitude,
+      requestedLongitude,
+      requestedRadiusMeters,
+      requestedWorkStartTime,
+      requestedWorkEndTime,
+      requestedIsTemporary,
+      requestedStartDate,
+      requestedEndDate
+    } = req.body;
+
+    // Validate request type
+    if (!requestType || !['location', 'timing', 'both'].includes(requestType)) {
+      return res.status(400).json({ error: 'Invalid request type' });
+    }
+
+    // ID = admin cannot send location/timing requests
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Administrators cannot submit location or timing requests' });
+    }
+
+    const empResult = await query(
+      'SELECT first_name, last_name, employee_id, department FROM employees WHERE id = $1',
+      [employeeId]
+    );
+    
+    if (empResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+    
+    const emp = empResult.rows[0];
+
+    // Insert request
+    const result = await query(
+      `INSERT INTO location_timing_requests (
+         employee_id, request_type, 
+         requested_location_name, requested_latitude, requested_longitude, requested_radius_meters,
+         requested_work_start_time, requested_work_end_time, requested_is_temporary, 
+         requested_start_date, requested_end_date, status
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')
+       RETURNING *`,
+      [
+        employeeId,
+        requestType,
+        requestType !== 'timing' ? requestedLocationName || 'Home/Custom Office' : null,
+        requestType !== 'timing' ? (requestedLatitude ? parseFloat(requestedLatitude) : null) : null,
+        requestType !== 'timing' ? (requestedLongitude ? parseFloat(requestedLongitude) : null) : null,
+        requestType !== 'timing' ? (requestedRadiusMeters ? parseInt(requestedRadiusMeters, 10) : 500) : null,
+        requestType !== 'location' ? requestedWorkStartTime || null : null,
+        requestType !== 'location' ? requestedWorkEndTime || null : null,
+        requestType !== 'location' ? requestedIsTemporary || false : false,
+        requestType !== 'location' && requestedIsTemporary ? requestedStartDate || null : null,
+        requestType !== 'location' && requestedIsTemporary ? requestedEndDate || null : null
+      ]
+    );
+
+    const newRequest = result.rows[0];
+
+    // Emit live WebSocket update to supervisors and admins
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        // Broadcast new request in real time
+        io.to('admin').emit('location_timing_request_new', {
+          ...newRequest,
+          first_name: emp.first_name,
+          last_name: emp.last_name,
+          employee_id_code: emp.employee_id,
+          department: emp.department
+        });
+      }
+    } catch (wsErr) {
+      logger.warn('Failed to broadcast location timing request WS alert', { error: wsErr.message });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Request submitted successfully',
+      data: newRequest
+    });
+  } catch (error) {
+    logger.error('Failed to submit location timing request', { error: error.message });
+    res.status(500).json({ error: 'Failed to submit request' });
   }
 });
 

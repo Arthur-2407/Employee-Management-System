@@ -31,6 +31,7 @@ import { leaveApi, LeaveRequest } from '@api/leaveApi';
 import FaceCamera from '@components/camera/FaceCamera';
 import { useNotification } from '@contexts/NotificationContext';
 import { useAuth } from '@contexts/AuthContext';
+import { websocketService } from '@services/websocketService';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -736,8 +737,24 @@ const AdminPage: React.FC = () => {
   const [workTimings, setWorkTimings] = useState<WorkTiming[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Supervisors interactive features state
+  const [expandedSupervisorsTab, setExpandedSupervisorsTab] = useState<Set<number>>(new Set());
+  const [selectedDetailEmployee, setSelectedDetailEmployee] = useState<Employee | null>(null);
+
   // Timing configuration modal states
   const [isAssignTimingModalOpen, setIsAssignTimingModalOpen] = useState(false);
+  
+  // Location & Timing Requests States
+  const [requests, setRequests] = useState<any[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [processingRequestId, setProcessingRequestId] = useState<number | null>(null);
+  const [pendingLocationData, setPendingLocationData] = useState<{
+    employeeId: number;
+    locName: string;
+    lat: number;
+    lng: number;
+    radius: number;
+  } | null>(null);
   const [timingModalType, setTimingModalType] = useState<'permanent' | 'temporary'>('permanent');
   const [selectedEmployeeIdForTiming, setSelectedEmployeeIdForTiming] = useState<string>('');
   const [timingWorkStart, setTimingWorkStart] = useState('09:00');
@@ -783,6 +800,30 @@ const AdminPage: React.FC = () => {
         // Refresh work timings
         const updatedTimings = await adminApi.getWorkTimings();
         setWorkTimings(updatedTimings.data.data || []);
+        fetchAllLocations();
+
+        if (processingRequestId) {
+          if (pendingLocationData) {
+            const empToLoc = employees.find(e => e.id === pendingLocationData.employeeId);
+            if (empToLoc) {
+              setSelectedEmpForLocation(empToLoc);
+              setLocationName(pendingLocationData.locName);
+              setLocationLat(String(pendingLocationData.lat));
+              setLocationLng(String(pendingLocationData.lng));
+              setLocationRadius(String(pendingLocationData.radius));
+              setCurrentLocation(null);
+              setIsLocationModalOpen(true);
+            }
+            setPendingLocationData(null);
+          } else {
+            await adminApi.updateLocationTimingRequest(processingRequestId, {
+              status: 'approved',
+              adminNotes: 'Approved and assigned work timing.'
+            });
+            setProcessingRequestId(null);
+            fetchRequests();
+          }
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -801,10 +842,89 @@ const AdminPage: React.FC = () => {
         // Refresh work timings
         const updatedTimings = await adminApi.getWorkTimings();
         setWorkTimings(updatedTimings.data.data || []);
+        fetchAllLocations();
       }
     } catch (err: any) {
       console.error(err);
       showError(err.response?.data?.error || 'Failed to delete work timing configuration');
+    }
+  };
+
+  const fetchRequests = async () => {
+    setRequestsLoading(true);
+    try {
+      const res = await adminApi.getLocationTimingRequests();
+      setRequests(res.data.data || []);
+    } catch (err) {
+      console.error('Failed to fetch requests:', err);
+    } finally {
+      setRequestsLoading(false);
+    }
+  };
+
+  const handleRejectRequest = async (requestId: number) => {
+    if (!window.confirm('Are you sure you want to reject this request?')) return;
+    try {
+      const res = await adminApi.updateLocationTimingRequest(requestId, { status: 'rejected', adminNotes: 'Rejected by administrator.' });
+      if (res.data.success || res.status === 200) {
+        showSuccess('Request rejected successfully');
+        fetchRequests();
+      }
+    } catch (err: any) {
+      console.error(err);
+      showError(err.response?.data?.error || 'Failed to reject request');
+    }
+  };
+
+  const handleAcceptRequest = (req: any) => {
+    const emp = employees.find(e => e.id === req.employee_id);
+    if (!emp) {
+      showError('Employee not found in registry');
+      return;
+    }
+
+    setProcessingRequestId(req.id);
+
+    if (req.request_type === 'timing') {
+      setTimingModalType(req.requested_is_temporary ? 'temporary' : 'permanent');
+      setSelectedEmployeeIdForTiming(String(emp.id));
+      setTimingWorkStart(req.requested_work_start_time ? req.requested_work_start_time.substring(0, 5) : '09:00');
+      setTimingWorkEnd(req.requested_work_end_time ? req.requested_work_end_time.substring(0, 5) : '18:00');
+      setTimingLunchStart('12:00');
+      setTimingLunchEnd('13:00');
+      if (req.requested_is_temporary) {
+        setTimingStartDate(req.requested_start_date ? req.requested_start_date.split('T')[0] : new Date().toISOString().split('T')[0]);
+        setTimingEndDate(req.requested_end_date ? req.requested_end_date.split('T')[0] : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
+      }
+      setIsAssignTimingModalOpen(true);
+    } else if (req.request_type === 'location') {
+      setSelectedEmpForLocation(emp);
+      setLocationName(req.requested_location_name || 'Assigned Location');
+      setLocationLat(String(req.requested_latitude || ''));
+      setLocationLng(String(req.requested_longitude || ''));
+      setLocationRadius(String(req.requested_radius_meters || '500'));
+      setCurrentLocation(null);
+      setIsLocationModalOpen(true);
+    } else if (req.request_type === 'both') {
+      setPendingLocationData({
+        employeeId: emp.id,
+        locName: req.requested_location_name || 'Assigned Location',
+        lat: req.requested_latitude || 0,
+        lng: req.requested_longitude || 0,
+        radius: req.requested_radius_meters || 500
+      });
+
+      setTimingModalType(req.requested_is_temporary ? 'temporary' : 'permanent');
+      setSelectedEmployeeIdForTiming(String(emp.id));
+      setTimingWorkStart(req.requested_work_start_time ? req.requested_work_start_time.substring(0, 5) : '09:00');
+      setTimingWorkEnd(req.requested_work_end_time ? req.requested_work_end_time.substring(0, 5) : '18:00');
+      setTimingLunchStart('12:00');
+      setTimingLunchEnd('13:00');
+      if (req.requested_is_temporary) {
+        setTimingStartDate(req.requested_start_date ? req.requested_start_date.split('T')[0] : new Date().toISOString().split('T')[0]);
+        setTimingEndDate(req.requested_end_date ? req.requested_end_date.split('T')[0] : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
+      }
+      setIsAssignTimingModalOpen(true);
     }
   };
 
@@ -824,6 +944,7 @@ const AdminPage: React.FC = () => {
   const [approvingLeaveId, setApprovingLeaveId] = useState<number | null>(null);
   const [rejectingLeaveId, setRejectingLeaveId] = useState<number | null>(null);
   const [leaveActionReason, setLeaveActionReason] = useState<string>('');
+  const [previewAttachment, setPreviewAttachment] = useState<{ data: string; name: string } | null>(null);
 
   // UI state
   const [activeTab, setActiveTab] = useState<Tab>('hierarchy');
@@ -891,8 +1012,9 @@ const AdminPage: React.FC = () => {
   const [locationRowsLoading, setLocationRowsLoading] = useState(false);
 
   // Fetch ALL employee locations from bulk endpoint — call after tab switch & after mutations
-  const fetchAllLocations = async () => {
-    setLocationRowsLoading(true);
+  const fetchAllLocations = async (silent: boolean | React.MouseEvent<any> = false) => {
+    const isSilent = typeof silent === 'boolean' ? silent : false;
+    if (!isSilent) setLocationRowsLoading(true);
     try {
       const res = await adminApi.getAllEmployeeLocations();
       const rows = res.data.data || [];
@@ -902,7 +1024,7 @@ const AdminPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to load employee locations:', err);
     } finally {
-      setLocationRowsLoading(false);
+      if (!isSilent) setLocationRowsLoading(false);
     }
   };
 
@@ -986,6 +1108,15 @@ const AdminPage: React.FC = () => {
       setSelectedEmpForLocation(null);
       fetchData();
       fetchAllLocations(); // refresh real-time location table
+
+      if (processingRequestId) {
+        await adminApi.updateLocationTimingRequest(processingRequestId, {
+          status: 'approved',
+          adminNotes: 'Approved and assigned work location.'
+        });
+        setProcessingRequestId(null);
+        fetchRequests();
+      }
     } catch (err: any) {
       showError(err.response?.data?.error || 'Failed to assign location');
     } finally {
@@ -1012,8 +1143,9 @@ const AdminPage: React.FC = () => {
   };
 
   // Fetch all data
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (silent: boolean | React.MouseEvent<any> = false) => {
+    const isSilent = typeof silent === 'boolean' ? silent : false;
+    if (!isSilent) setLoading(true);
     try {
       const [empResult, hierarchyResult, timingsResult, pendingResult, logsResult, leaveResult] = await Promise.allSettled([
         adminApi.getEmployees({ limit: 200 }),
@@ -1051,9 +1183,9 @@ const AdminPage: React.FC = () => {
       }
     } catch (err) {
       console.error('Admin data fetch error:', err);
-      showError('Failed to load admin data');
+      if (!isSilent) showError('Failed to load admin data');
     } finally {
-      setLoading(false);
+      if (!isSilent) setLoading(false);
     }
   };
 
@@ -1192,7 +1324,41 @@ const AdminPage: React.FC = () => {
   useEffect(() => {
     fetchData();
     fetchAllLocations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    fetchRequests();
+
+    const interval = setInterval(() => {
+      fetchData(true);
+      fetchAllLocations(true);
+      // Fetch requests silently in background
+      adminApi.getLocationTimingRequests().then(res => {
+        setRequests(res.data.data || []);
+      }).catch(err => console.error(err));
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const handleNewRequest = (data: any) => {
+      console.log('[WS] New location/timing request received:', data);
+      setRequests(prev => {
+        if (prev.some(r => r.id === data.id)) return prev;
+        return [data, ...prev];
+      });
+    };
+
+    const handleUpdatedRequest = (data: any) => {
+      console.log('[WS] Request updated:', data);
+      setRequests(prev => prev.map(r => r.id === data.id ? { ...r, ...data } : r));
+    };
+
+    websocketService.on('location_timing_request_new', handleNewRequest);
+    websocketService.on('location_timing_request_updated', handleUpdatedRequest);
+
+    return () => {
+      websocketService.off('location_timing_request_new', handleNewRequest);
+      websocketService.off('location_timing_request_updated', handleUpdatedRequest);
+    };
   }, []);
 
   // Filter employees
@@ -1217,6 +1383,26 @@ const AdminPage: React.FC = () => {
       }
       return next;
     });
+  };
+
+  // Toggle supervisor expansion in Supervisors management tab
+  const toggleSupervisorTab = (id: number) => {
+    setExpandedSupervisorsTab(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Helper to get supervisor name from id
+  const getSupervisorName = (supervisorId?: number | null) => {
+    if (!supervisorId) return 'None';
+    const sup = employees.find(e => e.id === supervisorId);
+    return sup ? `${sup.first_name} ${sup.last_name} (${sup.employee_id})` : `ID: ${supervisorId}`;
   };
 
   // Create employee handler
@@ -1614,52 +1800,52 @@ const AdminPage: React.FC = () => {
                                       )}
                                     </>
                                   )}
-                                  {emp.employee_id !== 'admin' && (
-                                    <>
-                                      <button
-                                        onClick={() => openLocationModal(emp)}
-                                        className="p-1.5 text-green-600 hover:bg-green-50 rounded transition-colors"
-                                        title="Assign work location"
-                                      >
-                                        <FaMapMarkerAlt className="text-sm" />
-                                      </button>
-                                      <button
-                                        onClick={() => {
-                                          setSelectedEmpForPassword(emp);
-                                          setNewPassword('');
-                                          setIsPasswordModalOpen(true);
-                                        }}
-                                        className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                                        title="Change password"
-                                      >
-                                        <FaKey className="text-sm" />
-                                      </button>
-                                      {emp.is_active ? (
+                                    <button
+                                      onClick={() => openLocationModal(emp)}
+                                      className="p-1.5 text-green-600 hover:bg-green-50 rounded transition-colors"
+                                      title="Assign work location"
+                                    >
+                                      <FaMapMarkerAlt className="text-sm" />
+                                    </button>
+                                    {emp.employee_id !== 'admin' && (
+                                      <>
                                         <button
-                                          onClick={() => handleDeactivate(emp)}
-                                          className="p-1.5 text-orange-500 hover:bg-orange-50 rounded transition-colors"
-                                          title="Deactivate employee"
+                                          onClick={() => {
+                                            setSelectedEmpForPassword(emp);
+                                            setNewPassword('');
+                                            setIsPasswordModalOpen(true);
+                                          }}
+                                          className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                                          title="Change password"
                                         >
-                                          <FaUserSlash className="text-sm" />
+                                          <FaKey className="text-sm" />
                                         </button>
-                                      ) : (
+                                        {emp.is_active ? (
+                                          <button
+                                            onClick={() => handleDeactivate(emp)}
+                                            className="p-1.5 text-orange-500 hover:bg-orange-50 rounded transition-colors"
+                                            title="Deactivate employee"
+                                          >
+                                            <FaUserSlash className="text-sm" />
+                                          </button>
+                                        ) : (
+                                          <button
+                                            onClick={() => handleActivate(emp)}
+                                            className="p-1.5 text-green-600 hover:bg-green-50 rounded transition-colors"
+                                            title="Activate employee"
+                                          >
+                                            <FaUserCheck className="text-sm" />
+                                          </button>
+                                        )}
                                         <button
-                                          onClick={() => handleActivate(emp)}
-                                          className="p-1.5 text-green-600 hover:bg-green-50 rounded transition-colors"
-                                          title="Activate employee"
+                                          onClick={() => handleRemoveEmployee(emp)}
+                                          className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
+                                          title="Remove employee"
                                         >
-                                          <FaUserCheck className="text-sm" />
+                                          <FaUserMinus className="text-sm" />
                                         </button>
-                                      )}
-                                      <button
-                                        onClick={() => handleRemoveEmployee(emp)}
-                                        className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
-                                        title="Remove employee"
-                                      >
-                                        <FaUserMinus className="text-sm" />
-                                      </button>
-                                    </>
-                                  )}
+                                      </>
+                                    )}
                                 </div>
                               </td>
                             </motion.tr>
@@ -1674,45 +1860,169 @@ const AdminPage: React.FC = () => {
 
             {/* ── SUPERVISORS TAB ── */}
             {activeTab === 'supervisors' && (
-              <div className="space-y-5">
-                <h2 className="text-lg font-semibold text-gray-900">Supervisor Management</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="space-y-5 animate-in fade-in duration-200">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900">Supervisor Management</h2>
+                    <p className="text-sm text-gray-500 mt-0.5">Click on any supervisor card to view and manage their assigned employees.</p>
+                  </div>
+                  <div className="text-sm text-gray-500 font-medium">
+                    {supervisors.length} Supervisors
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                   {supervisors.length === 0 ? (
-                    <div className="col-span-3 bg-white rounded-xl border border-gray-200 p-12 text-center">
-                      <FaUsers className="mx-auto text-4xl text-gray-300 mb-3" />
-                      <p className="text-gray-500">No supervisors configured yet.</p>
+                    <div className="col-span-3 bg-white rounded-2xl border border-gray-200 p-12 text-center shadow-sm">
+                      <FaUsers className="mx-auto text-5xl text-gray-300 mb-3" />
+                      <p className="text-gray-900 font-semibold text-lg">No supervisors configured yet.</p>
+                      <p className="text-sm text-gray-500 mt-1">Create a supervisor from the Add Employee modal.</p>
                       <button
                         onClick={() => { setCreateForm({ ...INITIAL_FORM, role: 'supervisor' }); setShowCreateModal(true); }}
-                        className="mt-3 text-sm text-blue-600 hover:underline font-medium"
+                        className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors shadow-sm inline-flex items-center gap-2"
                       >
-                        Create first supervisor →
+                        <FaUserPlus /> Create Supervisor
                       </button>
                     </div>
                   ) : (
-                    supervisors.map(sup => (
-                      <div key={sup.id} className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-                        <div className="flex items-center justify-between mb-4">
-                          <div className="flex items-center gap-3">
-                            <div className="h-12 w-12 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold">
-                              {sup.first_name[0]}{sup.last_name[0]}
+                    supervisors.map(sup => {
+                      const isExpanded = expandedSupervisorsTab.has(sup.id);
+                      return (
+                        <div
+                          key={sup.id}
+                          onClick={() => toggleSupervisorTab(sup.id)}
+                          className={`cursor-pointer bg-white rounded-2xl border transition-all duration-300 p-5 shadow-sm hover:shadow-md select-none flex flex-col justify-between relative overflow-hidden group ${
+                            isExpanded ? 'border-blue-500 ring-2 ring-blue-100 ring-offset-0' : 'border-gray-200 hover:border-blue-300'
+                          }`}
+                        >
+                          {/* Accent Line */}
+                          <div className={`absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${
+                            sup.role === 'admin' ? 'from-purple-500 to-indigo-500' : 'from-blue-500 to-indigo-500'
+                          }`} />
+
+                          <div>
+                            {/* Card Header */}
+                            <div className="flex items-start justify-between mb-4 mt-1">
+                              <div className="flex items-center gap-3">
+                                <div className={`h-12 w-12 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-sm bg-gradient-to-br ${
+                                  sup.role === 'admin' ? 'from-purple-500 to-indigo-600' : 'from-blue-500 to-indigo-600'
+                                }`}>
+                                  {sup.first_name[0]}{sup.last_name[0]}
+                                </div>
+                                <div>
+                                  <p className="font-bold text-gray-900 group-hover:text-blue-600 transition-colors flex items-center gap-1.5">
+                                    {sup.first_name} {sup.last_name}
+                                  </p>
+                                  <p className="text-xs text-gray-500 font-medium font-mono">{sup.employee_id}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <RoleBadge role={sup.role} />
+                                <div className="text-gray-400 group-hover:text-gray-600 transition-colors p-1">
+                                  {isExpanded ? <FaChevronDown className="text-xs text-blue-500" /> : <FaChevronRight className="text-xs" />}
+                                </div>
+                              </div>
                             </div>
-                            <div>
-                              <p className="font-semibold text-gray-900">{sup.first_name} {sup.last_name}</p>
-                              <p className="text-xs text-gray-500">{sup.employee_id}</p>
+
+                            {/* Supervisor Info Grid */}
+                            <div className="grid grid-cols-1 gap-2.5 text-sm border-t border-b border-gray-100 py-3.5 my-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-gray-500 font-medium">Department</span>
+                                <span className="text-gray-800 font-semibold">{sup.department || 'N/A'}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-gray-500 font-medium">Position</span>
+                                <span className="text-gray-800 font-semibold truncate max-w-[150px]" title={sup.position}>{sup.position || 'N/A'}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-gray-500 font-medium">Email</span>
+                                <span className="text-gray-800 font-semibold truncate max-w-[180px]" title={sup.email}>{sup.email || 'N/A'}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-gray-500 font-medium">Team Size</span>
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                                  {(sup.assigned_employees || []).length} active employees
+                                </span>
+                              </div>
                             </div>
                           </div>
-                          <RoleBadge role={sup.role} />
+
+                          {/* Interactive Section: View Supervisor Profile Button */}
+                          <div className="flex justify-between items-center pt-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const fullSup = employees.find(x => x.id === sup.id) || sup;
+                                setSelectedDetailEmployee(fullSup);
+                              }}
+                              className="text-xs text-gray-500 hover:text-blue-600 font-semibold flex items-center gap-1 transition-colors"
+                            >
+                              <FaUsers className="text-gray-400 group-hover:text-blue-500" /> View Supervisor Profile
+                            </button>
+                            <span className="text-xs text-blue-600 group-hover:underline font-semibold">
+                              {isExpanded ? 'Hide Team' : 'Show Team'}
+                            </span>
+                          </div>
+
+                          {/* Expanded Team Members List */}
+                          <AnimatePresence>
+                            {isExpanded && (
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.25 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="border-t border-gray-100 mt-4 pt-4">
+                                  <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                                    Employees Under {sup.first_name}
+                                  </h4>
+                                  {(sup.assigned_employees || []).length === 0 ? (
+                                    <div className="text-xs text-gray-400 italic py-2 text-center">
+                                      No employees currently assigned
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                                      {(sup.assigned_employees || []).map(emp => (
+                                        <div
+                                          key={emp.id}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            // Find the full employee from employees list
+                                            const fullEmp = employees.find(x => x.id === emp.id) || emp;
+                                            setSelectedDetailEmployee(fullEmp);
+                                          }}
+                                          className="flex items-center justify-between p-2 rounded-xl hover:bg-blue-50/60 border border-transparent hover:border-blue-100/50 transition-all cursor-pointer group/item"
+                                        >
+                                          <div className="flex items-center gap-2.5">
+                                            <div className="h-8 w-8 rounded-full bg-gray-100 group-hover/item:bg-blue-100 group-hover/item:text-blue-700 flex items-center justify-center text-gray-600 text-xs font-bold transition-colors">
+                                              {emp.first_name[0]}{emp.last_name[0]}
+                                            </div>
+                                            <div>
+                                              <p className="text-xs font-bold text-gray-900 group-hover/item:text-blue-700 transition-colors">
+                                                {emp.first_name} {emp.last_name}
+                                              </p>
+                                              <p className="text-[10px] text-gray-500 font-medium">{emp.position || 'Employee'}</p>
+                                            </div>
+                                          </div>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="text-[10px] text-gray-400 group-hover/item:text-blue-600 font-semibold opacity-0 group-hover/item:opacity-100 transition-all">
+                                              View Details
+                                            </span>
+                                            <FaChevronRight className="text-[8px] text-gray-300 group-hover/item:text-blue-500 transform translate-x-0 group-hover/item:translate-x-0.5 transition-all" />
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
-                        <div className="space-y-1 text-sm">
-                          <p className="text-gray-600"><span className="font-medium">Dept:</span> {sup.department}</p>
-                          <p className="text-gray-600"><span className="font-medium">Position:</span> {sup.position}</p>
-                          <p className="text-gray-600"><span className="font-medium">Email:</span> {sup.email}</p>
-                          <p className="text-gray-600">
-                            <span className="font-medium">Team:</span> {(sup.assigned_employees || []).length} employees
-                          </p>
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -1900,7 +2210,7 @@ const AdminPage: React.FC = () => {
                     )}
                   </div>
 
-                  {employees.filter(e => e.employee_id !== 'admin').length === 0 ? (
+                  {employees.length === 0 ? (
                     <div className="border-2 border-dashed border-gray-200 rounded-xl p-12 text-center">
                       <FaMapMarkerAlt className="mx-auto text-4xl text-gray-300 mb-3" />
                       <p className="text-gray-900 font-semibold text-base">No employees found.</p>
@@ -1913,12 +2223,13 @@ const AdminPage: React.FC = () => {
                           <tr>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Employee</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Work Timing</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned Location</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                          {employees.filter(e => e.employee_id !== 'admin').map(emp => (
+                          {employees.map(emp => (
                             <tr key={emp.id} className="hover:bg-gray-50">
                               <td className="px-4 py-3 text-sm font-medium text-gray-900">
                                 <div>
@@ -1930,7 +2241,20 @@ const AdminPage: React.FC = () => {
                                 <RoleBadge role={emp.role} />
                               </td>
                               <td className="px-4 py-3 text-sm text-gray-700">
-                                {employeeLocationRows[emp.id] ? (
+                                {employeeLocationRows[emp.id]?.work_start_time ? (
+                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${employeeLocationRows[emp.id]?.timing_is_temporary ? 'bg-purple-50 text-purple-700 border border-purple-200' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
+                                      <FaClock className={employeeLocationRows[emp.id]?.timing_is_temporary ? 'text-purple-500' : 'text-blue-500'} />
+                                      {employeeLocationRows[emp.id]?.work_start_time?.substring(0, 5)} - {employeeLocationRows[emp.id]?.work_end_time?.substring(0, 5)} {employeeLocationRows[emp.id]?.timing_is_temporary ? '(Temp)' : ''}
+                                    </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                                    <FaClock className="text-gray-400" />
+                                    Unassigned (Default 09:00 - 18:00)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-700">
+                                {employeeLocationRows[emp.id]?.location_name ? (
                                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
                                     <FaMapMarkerAlt className="text-green-500" />
                                     {employeeLocationRows[emp.id].location_name}
@@ -1950,6 +2274,126 @@ const AdminPage: React.FC = () => {
                                   <FaMapMarkerAlt />
                                   Assign Location
                                 </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Location & Timing Assignment Requests Section */}
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <h2 className="text-lg font-bold text-gray-900">Location & Timing Assignment Requests</h2>
+                      <p className="text-sm text-gray-500">Approve or reject employee and supervisor requests for work timings and custom coordinates in real time.</p>
+                    </div>
+                    {requestsLoading && (
+                      <div className="text-xs text-blue-500 flex items-center gap-1">
+                        <div className="h-3 w-3 rounded-full border border-blue-300 border-t-blue-500 animate-spin" />
+                        <span>Loading...</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {requests.length === 0 ? (
+                    <div className="border-2 border-dashed border-gray-200 rounded-xl p-12 text-center">
+                      <FaClock className="mx-auto text-4xl text-gray-300 mb-3" />
+                      <p className="text-gray-900 font-semibold text-base">No requests found.</p>
+                      <p className="text-sm text-gray-500 mt-1">Pending requests from employees will appear here in real-time.</p>
+                    </div>
+                  ) : (
+                    <div className="border border-gray-200 rounded-xl overflow-hidden">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Employee</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Requested Details</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Submitted At</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                          {requests.map(req => (
+                            <tr key={req.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                <div>
+                                  <p className="font-semibold">{req.first_name} {req.last_name}</p>
+                                  <p className="text-xs text-gray-500 font-mono">{req.employee_id_code}</p>
+                                  <p className="text-xs text-gray-400">{req.department}</p>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                                  req.request_type === 'location' ? 'bg-green-50 text-green-700 border-green-200' :
+                                  req.request_type === 'timing' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                                  'bg-purple-50 text-purple-700 border-purple-200'
+                                }`}>
+                                  {req.request_type.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-700">
+                                <div className="space-y-1.5 max-w-sm">
+                                  {(req.request_type === 'timing' || req.request_type === 'both') && (
+                                    <div className="flex flex-col text-xs bg-blue-50/50 p-2 rounded border border-blue-100">
+                                      <span className="font-semibold text-blue-800">Timing Request:</span>
+                                      <span className="font-mono">{req.requested_work_start_time?.substring(0, 5)} - {req.requested_work_end_time?.substring(0, 5)}</span>
+                                      {req.requested_is_temporary ? (
+                                        <span className="text-purple-600 text-[10px]">
+                                          Temp: {new Date(req.requested_start_date).toLocaleDateString()} to {new Date(req.requested_end_date).toLocaleDateString()}
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-500 text-[10px]">Permanent</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {(req.request_type === 'location' || req.request_type === 'both') && (
+                                    <div className="flex flex-col text-xs bg-green-50/50 p-2 rounded border border-green-100">
+                                      <span className="font-semibold text-green-800">Location Request:</span>
+                                      <span className="font-medium text-gray-900">{req.requested_location_name}</span>
+                                      <span className="text-gray-600 font-mono">Coords: {req.requested_latitude?.toFixed(5)}, {req.requested_longitude?.toFixed(5)}</span>
+                                      <span className="text-gray-500 text-[10px]">Radius: {req.requested_radius_meters}m</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-xs text-gray-500">
+                                {new Date(req.created_at).toLocaleString()}
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                                  req.status === 'approved' ? 'bg-green-100 text-green-800 border-green-200' :
+                                  req.status === 'rejected' ? 'bg-red-100 text-red-800 border-red-200' :
+                                  'bg-yellow-100 text-yellow-800 border-yellow-200 animate-pulse'
+                                }`}>
+                                  {req.status.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-sm">
+                                {req.status === 'pending' ? (
+                                  <div className="flex gap-2">
+                                    <button
+                                      onClick={() => handleAcceptRequest(req)}
+                                      className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                      Accept
+                                    </button>
+                                    <button
+                                      onClick={() => handleRejectRequest(req.id)}
+                                      className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold shadow-sm transition-all"
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-500 italic">
+                                    {req.admin_notes || 'Processed'}
+                                  </span>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -2353,6 +2797,14 @@ const AdminPage: React.FC = () => {
                               </div>
                             ) : (
                               <>
+                                {request.attachment_data && (
+                                  <button
+                                    onClick={() => setPreviewAttachment({ data: request.attachment_data!, name: request.attachment_name || 'attachment' })}
+                                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors"
+                                  >
+                                    View Attachment
+                                  </button>
+                                )}
                                 <button
                                   disabled={approvingLeaveId === request.id}
                                   onClick={() => handleApproveLeave(request.id)}
@@ -3235,6 +3687,264 @@ const AdminPage: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── EMPLOYEE DETAILS POPUP MODAL ── */}
+      <AnimatePresence>
+        {selectedDetailEmployee && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[80] flex items-center justify-center p-4 overflow-y-auto"
+            onClick={(e) => { if (e.target === e.currentTarget) setSelectedDetailEmployee(null); }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden border border-gray-100 flex flex-col my-8"
+            >
+              {/* Header Banner */}
+              <div className={`px-6 py-5 flex items-center justify-between text-white ${
+                selectedDetailEmployee.role === 'admin' 
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600' 
+                  : selectedDetailEmployee.role === 'supervisor'
+                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600'
+                    : 'bg-gradient-to-r from-slate-700 to-slate-800'
+              }`}>
+                <div className="flex items-center gap-4">
+                  <div className="h-14 w-14 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center text-white font-bold text-xl border border-white/30 shadow-sm">
+                    {selectedDetailEmployee.first_name[0]}{selectedDetailEmployee.last_name[0]}
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold tracking-tight">
+                      {selectedDetailEmployee.first_name} {selectedDetailEmployee.last_name}
+                    </h3>
+                    <p className="text-xs text-white/80 font-medium mt-0.5">
+                      {selectedDetailEmployee.position || 'No position assigned'} &bull; {selectedDetailEmployee.department || 'No department'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedDetailEmployee(null)}
+                  className="p-2 text-white/80 hover:text-white rounded-xl hover:bg-white/10 transition-colors"
+                >
+                  <FaTimes className="text-lg" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto bg-gray-50/50">
+                {/* Grid for core info */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Account Information Card */}
+                  <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm space-y-3">
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Account Details</h4>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500 font-medium">Employee ID</span>
+                        <span className="text-gray-900 font-bold font-mono">{selectedDetailEmployee.employee_id}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500 font-medium">System Role</span>
+                        <span className="text-gray-900 font-semibold capitalize">{selectedDetailEmployee.role}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500 font-medium">Department</span>
+                        <span className="text-gray-900 font-semibold">{selectedDetailEmployee.department || 'N/A'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500 font-medium">Supervisor</span>
+                        <span className="text-gray-900 font-semibold truncate max-w-[160px]" title={getSupervisorName(selectedDetailEmployee.supervisor_id)}>
+                          {getSupervisorName(selectedDetailEmployee.supervisor_id)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Security & Authentication Card */}
+                  <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm space-y-3">
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Security & Auth</h4>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-500 font-medium">Status</span>
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                          selectedDetailEmployee.is_active ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-gray-100 text-gray-600 border border-gray-250'
+                        }`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${selectedDetailEmployee.is_active ? 'bg-green-500' : 'bg-gray-400'}`} />
+                          {selectedDetailEmployee.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-500 font-medium">Face Recognition</span>
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                          selectedDetailEmployee.face_enrolled ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-250'
+                        }`}>
+                          {selectedDetailEmployee.face_enrolled ? 'Enrolled' : 'Not Registered'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-500 font-medium">MFA Status</span>
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                          selectedDetailEmployee.mfa_enabled ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-gray-100 text-gray-650'
+                        }`}>
+                          {selectedDetailEmployee.mfa_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500 font-medium">Hire Date</span>
+                        <span className="text-gray-900 font-semibold">
+                          {selectedDetailEmployee.hire_date ? new Date(selectedDetailEmployee.hire_date).toLocaleDateString() : 'N/A'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Contact Details Card */}
+                  <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm space-y-3 col-span-1 md:col-span-2">
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Contact Information</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <span className="block text-xs text-gray-400 font-medium">Email Address</span>
+                        <span className="text-gray-900 font-semibold select-all">{selectedDetailEmployee.email}</span>
+                      </div>
+                      <div>
+                        <span className="block text-xs text-gray-400 font-medium">Phone Number</span>
+                        <span className="text-gray-900 font-semibold select-all">{selectedDetailEmployee.phone_number || 'No phone registered'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Assigned Location Card */}
+                  <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm space-y-3 col-span-1 md:col-span-2">
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Work Location Geo-Fence</h4>
+                    {employeeLocationRows[selectedDetailEmployee.id]?.location_name ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                          <div>
+                            <span className="block text-xs text-gray-400 font-medium">Location Name</span>
+                            <span className="text-green-700 font-bold flex items-center gap-1">
+                              <FaMapMarkerAlt /> {employeeLocationRows[selectedDetailEmployee.id].location_name}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="block text-xs text-gray-400 font-medium">Coordinates</span>
+                            <span className="text-gray-900 font-mono font-semibold">
+                              {Number(employeeLocationRows[selectedDetailEmployee.id].latitude).toFixed(6)}, {Number(employeeLocationRows[selectedDetailEmployee.id].longitude).toFixed(6)}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="block text-xs text-gray-400 font-medium">Radius Limit</span>
+                            <span className="text-gray-900 font-semibold">
+                              {employeeLocationRows[selectedDetailEmployee.id].radius_meters} meters
+                            </span>
+                          </div>
+                        </div>
+                        <div className="bg-green-50/50 p-2.5 rounded-xl border border-green-100 flex items-center justify-between">
+                          <span className="text-xs text-green-700 font-medium">This employee has a custom location assigned.</span>
+                          <a
+                            href={`https://maps.google.com/maps?q=${employeeLocationRows[selectedDetailEmployee.id].latitude},${employeeLocationRows[selectedDetailEmployee.id].longitude}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline font-bold"
+                          >
+                            <FaMapMarkerAlt /> Open in Google Maps
+                          </a>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="h-8 w-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-400">
+                            <FaMapMarkerAlt />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-gray-700">Global Office Location (Default)</p>
+                            <p className="text-[10px] text-gray-500">No individual geofence assigned. Default office radius applies.</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const emp = selectedDetailEmployee;
+                            setSelectedDetailEmployee(null);
+                            openLocationModal(emp);
+                          }}
+                          className="px-3 py-1.5 text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg font-bold transition-colors border border-blue-100"
+                        >
+                          Assign Location
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Audit metadata logs */}
+                <div className="text-[10px] text-gray-400 flex flex-wrap justify-between pt-2">
+                  <span>Joined System: {new Date(selectedDetailEmployee.created_at).toLocaleString()}</span>
+                  {selectedDetailEmployee.updated_at && (
+                    <span>Last Updated: {new Date(selectedDetailEmployee.updated_at).toLocaleString()}</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-gray-100 flex justify-end bg-gray-50/50">
+                <button
+                  onClick={() => setSelectedDetailEmployee(null)}
+                  className="px-5 py-2.5 text-sm font-semibold bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-xl transition-colors shadow-sm"
+                >
+                  Close Profile
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Attachment Preview Modal */}
+      {previewAttachment && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-70 p-4">
+          <div className="bg-white rounded-2xl max-w-4xl w-full p-6 shadow-2xl relative max-h-[90vh] flex flex-col animate-in fade-in zoom-in duration-200">
+            <div className="flex justify-between items-center pb-4 border-b border-gray-200">
+              <h3 className="text-xl font-bold text-gray-800 truncate">
+                Attachment: {previewAttachment.name}
+              </h3>
+              <button
+                onClick={() => setPreviewAttachment(null)}
+                className="text-gray-500 hover:text-gray-700 text-2xl font-semibold focus:outline-none"
+              >
+                &times;
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-auto my-4 flex items-center justify-center bg-gray-50 rounded-lg p-2 min-h-[50vh]">
+              {previewAttachment.data.startsWith('data:application/pdf') || previewAttachment.name.toLowerCase().endsWith('.pdf') ? (
+                <iframe
+                  src={previewAttachment.data}
+                  className="w-full h-[65vh] border-0 rounded-lg"
+                  title="PDF Document Viewer"
+                />
+              ) : (
+                <img
+                  src={previewAttachment.data}
+                  alt="Attachment Preview"
+                  className="max-w-full max-h-[65vh] object-contain rounded-lg shadow"
+                />
+              )}
+            </div>
+            
+            <div className="flex justify-end pt-4 border-t border-gray-200">
+              <button
+                type="button"
+                onClick={() => setPreviewAttachment(null)}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors font-medium text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

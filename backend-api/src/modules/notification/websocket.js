@@ -41,6 +41,9 @@ function setupWebSocket(io) {
 
     if (socket.user.role === 'supervisor' || socket.user.role === 'admin') {
       socket.join('supervisors');
+      if (socket.user.role === 'admin') {
+        socket.join('admin');
+      }
       socket.emit('joined', { status: 'connected', role: socket.user.role });
     }
 
@@ -51,6 +54,9 @@ function setupWebSocket(io) {
     socket.on('join-supervisor', () => {
       if (socket.user.role === 'supervisor' || socket.user.role === 'admin') {
         socket.join('supervisors');
+        if (socket.user.role === 'admin') {
+          socket.join('admin');
+        }
         socket.emit('joined', { status: 'connected', role: socket.user.role });
       } else {
         socket.emit('error', { code: 'FORBIDDEN', message: 'Supervisor role required' });

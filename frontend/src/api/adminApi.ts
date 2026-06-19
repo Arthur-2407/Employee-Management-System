@@ -54,6 +54,9 @@ export interface EmployeeLocationRow {
   radius_meters: number | null;
   location_is_active: boolean | null;
   location_updated_at: string | null;
+  work_start_time?: string | null;
+  work_end_time?: string | null;
+  timing_is_temporary?: boolean | null;
 }
 
 
@@ -238,5 +241,16 @@ export const adminApi = {
 
   replaceAdmin: async (data: any): Promise<AxiosResponse<{ success: boolean; message: string }>> => {
     return api.post('/admin/reset/replace', data);
+  },
+
+  getLocationTimingRequests: async (): Promise<AxiosResponse<{ success: boolean; data: any[] }>> => {
+    return api.get('/admin/location-timing-requests');
+  },
+
+  updateLocationTimingRequest: async (
+    requestId: number,
+    data: { status: 'approved' | 'rejected'; adminNotes?: string }
+  ): Promise<AxiosResponse<{ success: boolean; data: any }>> => {
+    return api.put(`/admin/location-timing-requests/${requestId}`, data);
   },
 };

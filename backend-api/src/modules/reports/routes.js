@@ -42,11 +42,20 @@ function hoursString(value) {
 }
 
 function scopedParams(role, startDate, endDate, employeeId) {
-  return role === 'employee' ? [startDate, endDate, employeeId] : [startDate, endDate];
+  if (role === 'employee' || role === 'supervisor') {
+    return [startDate, endDate, employeeId];
+  }
+  return [startDate, endDate];
 }
 
 function employeeScope(role, column = 'employee_id') {
-  return role === 'employee' ? `AND ${column} = $3` : '';
+  if (role === 'employee') {
+    return `AND ${column} = $3`;
+  }
+  if (role === 'supervisor') {
+    return `AND (${column} = $3 OR ${column} IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $3 AND is_active = TRUE))`;
+  }
+  return '';
 }
 
 // GET /api/reports - aggregated reports data for dashboard charts and cards.
@@ -113,16 +122,36 @@ router.get('/', async (req, res) => {
     );
 
     // Use configurable work start time instead of hardcoded 09:00:00
+    const lateParams = [startDate, endDate, workStartTime];
+    let lateScope = '';
+    if (role === 'employee') {
+      lateScope = `AND ar.employee_id = $4`;
+      lateParams.push(employeeId);
+    } else if (role === 'supervisor') {
+      lateScope = `AND (ar.employee_id = $4 OR ar.employee_id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $4 AND is_active = TRUE))`;
+      lateParams.push(employeeId);
+    }
+
     const lateArrivals = await query(
       `SELECT COUNT(*) AS late_count
        FROM attendance_records ar
        WHERE ar.check_in_time::DATE BETWEEN $1::DATE AND $2::DATE
          AND ar.check_in_time::TIME > $3::TIME
-       ${employeeScope(role, 'ar.employee_id')}`,
-      [...params, workStartTime]
+       ${lateScope}`,
+      lateParams
     );
 
     // Use configurable work start time in weekly data query
+    const weeklyParams = [startDate, endDate, workStartTime];
+    let weeklyScope = '';
+    if (role === 'employee') {
+      weeklyScope = `AND ar.employee_id = $4`;
+      weeklyParams.push(employeeId);
+    } else if (role === 'supervisor') {
+      weeklyScope = `AND (ar.employee_id = $4 OR ar.employee_id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $4 AND is_active = TRUE))`;
+      weeklyParams.push(employeeId);
+    }
+
     const weeklyData = await query(
       `SELECT
          date_trunc('week', ar.check_in_time)::DATE AS week_start,
@@ -131,14 +160,14 @@ router.get('/', async (req, res) => {
          COUNT(*) FILTER (WHERE ar.check_in_time::TIME > $3::TIME) AS late_arrivals
        FROM attendance_records ar
        WHERE ar.check_in_time::DATE BETWEEN $1::DATE AND $2::DATE
-       ${employeeScope(role, 'ar.employee_id')}
+       ${weeklyScope}
        GROUP BY week_start
        ORDER BY week_start`,
-      [...params, workStartTime]
+      weeklyParams
     );
 
     let departmentRows = [];
-    if (role === 'admin' || role === 'supervisor') {
+    if (req.user?.role === 'admin') {
       const departmentStats = await query(
         `SELECT
            COALESCE(e.department, 'Unassigned') AS department,
@@ -263,7 +292,7 @@ router.get('/attendance', async (req, res) => {
       paramIndex++;
     } else {
       if (role === 'supervisor') {
-        filterSql += ` AND (ar.employee_id = $${paramIndex} OR e.supervisor_id = $${paramIndex})`;
+        filterSql += ` AND (ar.employee_id = $${paramIndex} OR ar.employee_id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $${paramIndex} AND is_active = TRUE))`;
         params.push(userDbId);
         paramIndex++;
       }
@@ -285,9 +314,19 @@ router.get('/attendance', async (req, res) => {
     const offsetIdx = paramIndex++;
 
     const result = await query(
-      `SELECT ar.*, e.employee_id, e.first_name, e.last_name, e.department
+      `SELECT ar.*, e.employee_id, e.first_name, e.last_name, e.department,
+              COALESCE(wt_temp.work_start_time, wt_perm.work_start_time, '09:00:00') AS work_start_time,
+              COALESCE(wt_temp.work_end_time, wt_perm.work_end_time, '18:00:00') AS work_end_time
        FROM attendance_records ar
        JOIN employees e ON ar.employee_id = e.id
+       LEFT JOIN work_timings wt_temp ON wt_temp.employee_id = ar.employee_id
+         AND wt_temp.is_temporary = TRUE
+         AND wt_temp.is_active = TRUE
+         AND ar.check_in_time::DATE >= wt_temp.start_date
+         AND ar.check_in_time::DATE <= wt_temp.end_date
+       LEFT JOIN work_timings wt_perm ON wt_perm.employee_id = ar.employee_id
+         AND wt_perm.is_temporary = FALSE
+         AND wt_perm.is_active = TRUE
        WHERE ar.check_in_time::DATE BETWEEN $1::DATE AND $2::DATE
        ${filterSql}
        ORDER BY ar.check_in_time DESC
@@ -322,7 +361,7 @@ router.get('/leave', async (req, res) => {
       paramIndex++;
     } else {
       if (role === 'supervisor') {
-        filterSql += ` AND lr.supervisor_id = $${paramIndex}`;
+        filterSql += ` AND (lr.employee_id = $${paramIndex} OR lr.employee_id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $${paramIndex} AND is_active = TRUE))`;
         params.push(userDbId);
         paramIndex++;
       }
@@ -370,7 +409,8 @@ router.get('/leave', async (req, res) => {
 // GET /api/reports/security - detailed security audit log
 router.get('/security', async (req, res) => {
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'supervisor') {
+  const userDbId = req.user?.id;
+  if (role !== 'admin' && role !== 'supervisor' && role !== 'employee') {
     return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
 
@@ -383,6 +423,16 @@ router.get('/security', async (req, res) => {
     const params = [toDateString(start), toDateString(end)];
     let filterSql = '';
     let paramIndex = 3;
+
+    if (role === 'employee') {
+      filterSql += ` AND se.employee_id = $${paramIndex}`;
+      params.push(userDbId);
+      paramIndex++;
+    } else if (role === 'supervisor') {
+      filterSql += ` AND (se.employee_id = $${paramIndex} OR se.employee_id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $${paramIndex} AND is_active = TRUE))`;
+      params.push(userDbId);
+      paramIndex++;
+    }
 
     if (severity) {
       filterSql += ` AND se.severity = $${paramIndex}`;
@@ -426,7 +476,8 @@ router.get('/security', async (req, res) => {
 // GET /api/reports/performance - employee performance stats
 router.get('/performance', async (req, res) => {
   const role = req.user?.role;
-  if (role !== 'admin' && role !== 'supervisor') {
+  const userDbId = req.user?.id;
+  if (role !== 'admin' && role !== 'supervisor' && role !== 'employee') {
     return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
 
@@ -450,6 +501,16 @@ router.get('/performance', async (req, res) => {
     const params = [toDateString(start), toDateString(end), workStartTime];
     let filterSql = '';
     let paramIndex = 4;
+
+    if (role === 'employee') {
+      filterSql += ` AND e.id = $${paramIndex}`;
+      params.push(userDbId);
+      paramIndex++;
+    } else if (role === 'supervisor') {
+      filterSql += ` AND (e.id = $${paramIndex} OR e.id IN (SELECT employee_id FROM supervisor_assignments WHERE supervisor_id = $${paramIndex} AND is_active = TRUE))`;
+      params.push(userDbId);
+      paramIndex++;
+    }
 
     if (department) {
       filterSql += ` AND e.department = $${paramIndex}`;
@@ -485,17 +546,60 @@ router.get('/performance', async (req, res) => {
   }
 });
 
+// GET /api/reports/managed-employees - returns the list of employees the logged-in user can view
+router.get('/managed-employees', async (req, res) => {
+  const role = req.user?.role;
+  const userDbId = req.user?.id;
+
+  try {
+    let result;
+
+    if (role === 'admin') {
+      // Admin sees all active employees (all roles)
+      result = await query(
+        `SELECT id, employee_id, first_name, last_name, department, role
+         FROM employees
+         WHERE is_active = TRUE
+         ORDER BY role, first_name, last_name`
+      );
+    } else if (role === 'supervisor') {
+      // Supervisor sees only the employees assigned to them
+      result = await query(
+        `SELECT e.id, e.employee_id, e.first_name, e.last_name, e.department, e.role
+         FROM employees e
+         WHERE e.id IN (
+           SELECT employee_id FROM supervisor_assignments
+           WHERE supervisor_id = $1 AND is_active = TRUE
+         ) AND e.is_active = TRUE
+         ORDER BY e.first_name, e.last_name`,
+        [userDbId]
+      );
+    } else {
+      // Employees see only themselves
+      result = await query(
+        `SELECT id, employee_id, first_name, last_name, department, role
+         FROM employees WHERE id = $1 AND is_active = TRUE`,
+        [userDbId]
+      );
+    }
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    logger.error('Managed employees fetch error', { error: error.message, role, userDbId });
+    res.status(500).json({ success: false, message: 'Failed to fetch managed employees' });
+  }
+});
+
 // GET /api/reports/departments - department metrics
 router.get('/departments', async (req, res) => {
-  const role = req.user?.role;
-  if (role !== 'admin' && role !== 'supervisor') {
+  if (req.user?.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
 
   const { startDate, endDate } = req.query;
 
   try {
-    const start = startDate ? new Date(startDate) : new_Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const end = endDate ? new Date(endDate) : new Date();
 
     const result = await query(

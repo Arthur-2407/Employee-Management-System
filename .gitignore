@@ -49,3 +49,4 @@ orchestration-report.json
 .bundle-baseline.json
 .state-integrity.json
 .state-snapshots/
+backups/

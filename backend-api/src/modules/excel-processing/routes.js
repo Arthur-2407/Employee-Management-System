@@ -54,11 +54,15 @@ function styleDataRow(row, rowIndex) {
   row.height = 22;
 }
 
+function toDateString(date) {
+  return date.toISOString().slice(0, 10);
+}
+
 // GET /api/excel/attendance - Download attendance data as a real .xlsx file
-// Requires: supervisor or admin role
-router.get('/attendance', authenticateToken, requireRole('supervisor'), async (req, res) => {
+// Requires: employee, supervisor or admin role
+router.get('/attendance', authenticateToken, requireRole('employee'), async (req, res) => {
   try {
-    const { start_date, end_date, department } = req.query;
+    const { start_date, end_date, department, employee_id } = req.query;
 
     let queryText = `
       SELECT 
@@ -80,14 +84,18 @@ router.get('/attendance', authenticateToken, requireRole('supervisor'), async (r
     const params = [];
     let paramCount = 0;
 
-    // Supervisor scope: only their assigned employees
-    if (req.user.role === 'supervisor') {
+    // Role-based scope filtering
+    if (req.user.role === 'employee') {
+      paramCount++;
+      queryText += ` AND a.employee_id = $${paramCount}`;
+      params.push(req.user.id);
+    } else if (req.user.role === 'supervisor') {
       paramCount++;
       queryText += `
-        AND a.employee_id IN (
+        AND (a.employee_id = $${paramCount} OR a.employee_id IN (
           SELECT employee_id FROM supervisor_assignments
           WHERE supervisor_id = $${paramCount} AND is_active = TRUE
-        )`;
+        ))`;
       params.push(req.user.id);
     }
 
@@ -107,6 +115,13 @@ router.get('/attendance', authenticateToken, requireRole('supervisor'), async (r
       paramCount++;
       queryText += ` AND e.department = $${paramCount}`;
       params.push(department);
+    }
+
+    // Optional per-employee filter for admin/supervisor drill-down
+    if (employee_id && req.user.role !== 'employee') {
+      paramCount++;
+      queryText += ` AND e.employee_id = $${paramCount}`;
+      params.push(employee_id);
     }
 
     queryText += ' ORDER BY e.employee_id, a.check_in_time DESC';
@@ -189,10 +204,10 @@ router.get('/attendance', authenticateToken, requireRole('supervisor'), async (r
 });
 
 // GET /api/excel/leave - Download leave data as a real .xlsx file
-// Requires: supervisor or admin role
-router.get('/leave', authenticateToken, requireRole('supervisor'), async (req, res) => {
+// Requires: employee, supervisor or admin role
+router.get('/leave', authenticateToken, requireRole('employee'), async (req, res) => {
   try {
-    const { start_date, end_date } = req.query;
+    const { start_date, end_date, employee_id } = req.query;
 
     let queryText = `
       SELECT 
@@ -216,14 +231,18 @@ router.get('/leave', authenticateToken, requireRole('supervisor'), async (req, r
     const params = [];
     let paramCount = 0;
 
-    // Supervisor scope
-    if (req.user.role === 'supervisor') {
+    // Role-based scope filtering
+    if (req.user.role === 'employee') {
+      paramCount++;
+      queryText += ` AND l.employee_id = $${paramCount}`;
+      params.push(req.user.id);
+    } else if (req.user.role === 'supervisor') {
       paramCount++;
       queryText += `
-        AND l.employee_id IN (
+        AND (l.employee_id = $${paramCount} OR l.employee_id IN (
           SELECT employee_id FROM supervisor_assignments
           WHERE supervisor_id = $${paramCount} AND is_active = TRUE
-        )`;
+        ))`;
       params.push(req.user.id);
     }
 
@@ -237,6 +256,13 @@ router.get('/leave', authenticateToken, requireRole('supervisor'), async (req, r
       paramCount++;
       queryText += ` AND l.end_date <= $${paramCount}`;
       params.push(end_date);
+    }
+
+    // Optional per-employee filter for admin/supervisor drill-down
+    if (employee_id && req.user.role !== 'employee') {
+      paramCount++;
+      queryText += ` AND e.employee_id = $${paramCount}`;
+      params.push(employee_id);
     }
 
     queryText += ' ORDER BY l.created_at DESC';
@@ -370,8 +396,8 @@ router.post('/upload', authenticateToken, requireRole('admin'), async (req, res)
 });
 
 // GET /api/excel/employees - Download employee roster as .xlsx
-// Requires: admin role
-router.get('/employees', authenticateToken, requireRole('admin'), async (req, res) => {
+// Requires: employee, supervisor or admin role
+router.get('/employees', authenticateToken, requireRole('employee'), async (req, res) => {
   try {
     const { department, role: filterRole } = req.query;
     let queryText = `
@@ -399,6 +425,20 @@ router.get('/employees', authenticateToken, requireRole('admin'), async (req, re
 
     const params = [];
     let paramCount = 0;
+
+    if (req.user.role === 'employee') {
+      paramCount++;
+      queryText += ` AND e.id = $${paramCount}`;
+      params.push(req.user.id);
+    } else if (req.user.role === 'supervisor') {
+      paramCount++;
+      queryText += `
+        AND (e.id = $${paramCount} OR e.id IN (
+          SELECT employee_id FROM supervisor_assignments
+          WHERE supervisor_id = $${paramCount} AND is_active = TRUE
+        ))`;
+      params.push(req.user.id);
+    }
 
     if (department) {
       paramCount++;
@@ -596,8 +636,8 @@ router.get('/audit-logs', authenticateToken, requireRole('admin'), async (req, r
   }
 });
 
-// GET /api/excel/security-events - Download security events as .xlsx (admin only)
-router.get('/security-events', authenticateToken, requireRole('admin'), async (req, res) => {
+// GET /api/excel/security-events - Download security events as .xlsx (admin or supervisor or employee)
+router.get('/security-events', authenticateToken, requireRole('employee'), async (req, res) => {
   try {
     const { start_date, end_date, event_type, severity } = req.query;
 
@@ -609,28 +649,42 @@ router.get('/security-events', authenticateToken, requireRole('admin'), async (r
         se.ip_address,
         se.device_info,
         se.details,
-        se.created_at,
+        se.timestamp AS created_at,
         e.employee_id,
         e.first_name,
         e.last_name,
         e.role AS employee_role
       FROM security_events se
-      LEFT JOIN employees e ON se.employee_id = e.employee_id
+      LEFT JOIN employees e ON se.employee_id = e.id
       WHERE 1=1
     `;
 
     const params = [];
     let paramCount = 0;
 
+    if (req.user.role === 'employee') {
+      paramCount++;
+      queryText += ` AND se.employee_id = $${paramCount}`;
+      params.push(req.user.id);
+    } else if (req.user.role === 'supervisor') {
+      paramCount++;
+      queryText += `
+        AND (se.employee_id = $${paramCount} OR se.employee_id IN (
+          SELECT employee_id FROM supervisor_assignments
+          WHERE supervisor_id = $${paramCount} AND is_active = TRUE
+        ))`;
+      params.push(req.user.id);
+    }
+
     if (start_date) {
       paramCount++;
-      queryText += ` AND se.created_at >= $${paramCount}`;
+      queryText += ` AND se.timestamp >= $${paramCount}`;
       params.push(new Date(start_date));
     }
 
     if (end_date) {
       paramCount++;
-      queryText += ` AND se.created_at <= $${paramCount}`;
+      queryText += ` AND se.timestamp <= $${paramCount}`;
       params.push(new Date(end_date));
     }
 
@@ -646,7 +700,7 @@ router.get('/security-events', authenticateToken, requireRole('admin'), async (r
       params.push(severity);
     }
 
-    queryText += ' ORDER BY se.created_at DESC LIMIT 10000';
+    queryText += ' ORDER BY se.timestamp DESC LIMIT 10000';
 
     const result = await query(queryText, params);
 
@@ -716,6 +770,124 @@ router.get('/security-events', authenticateToken, requireRole('admin'), async (r
   } catch (error) {
     logger.error('Excel security events export error', { error: error.message, userId: req.user?.id });
     res.status(500).json({ success: false, message: 'Failed to generate security events export' });
+  }
+});
+
+// GET /api/excel/performance - Download performance metrics as .xlsx
+// Requires: employee, supervisor or admin role
+router.get('/performance', authenticateToken, requireRole('employee'), async (req, res) => {
+  try {
+    const { start_date, end_date, department } = req.query;
+
+    const start = start_date ? new Date(start_date) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const end = end_date ? new Date(end_date) : new Date();
+
+    let workStartTime = '09:00:00';
+    try {
+      const workTimingResult = await query(
+        `SELECT work_start_time FROM office_locations 
+         WHERE is_active = TRUE ORDER BY id LIMIT 1`
+      );
+      if (workTimingResult.rows[0]?.work_start_time) {
+        workStartTime = workTimingResult.rows[0].work_start_time;
+      }
+    } catch (e) {}
+
+    const params = [toDateString(start), toDateString(end), workStartTime];
+    let filterSql = '';
+    let paramIndex = 4;
+
+    if (req.user.role === 'employee') {
+      filterSql += ` AND e.id = $${paramIndex}`;
+      params.push(req.user.id);
+      paramIndex++;
+    } else if (req.user.role === 'supervisor') {
+      filterSql += ` AND (e.id = $${paramIndex} OR e.id IN (
+        SELECT employee_id FROM supervisor_assignments
+        WHERE supervisor_id = $${paramIndex} AND is_active = TRUE
+      ))`;
+      params.push(req.user.id);
+      paramIndex++;
+    }
+
+    if (department) {
+      filterSql += ` AND e.department = $${paramIndex}`;
+      params.push(department);
+      paramIndex++;
+    }
+
+    const queryText = `
+      SELECT e.employee_id, e.first_name, e.last_name, e.department, e.position,
+             COUNT(ar.id)::int AS total_checkins,
+             ROUND(COALESCE(AVG(EXTRACT(EPOCH FROM ar.work_hours) / 3600), 0)::numeric, 2)::float AS avg_hours,
+             COUNT(ar.id) FILTER (WHERE ar.check_in_time::TIME > $3::TIME)::int AS late_count
+      FROM employees e
+      LEFT JOIN attendance_records ar ON e.id = ar.employee_id 
+        AND ar.check_in_time::DATE BETWEEN $1::DATE AND $2::DATE
+      WHERE e.is_active = TRUE
+      ${filterSql}
+      GROUP BY e.id, e.employee_id, e.first_name, e.last_name, e.department, e.position
+      ORDER BY total_checkins DESC, avg_hours DESC
+    `;
+
+    const result = await query(queryText, params);
+
+    if (req.headers.accept === 'application/json') {
+      return res.json({ success: true, data: result.rows, count: result.rows.length });
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Enterprise Attendance System';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Performance Report', {
+      pageSetup: { paperSize: 9, orientation: 'landscape' },
+    });
+
+    sheet.columns = [
+      { header: 'Employee ID',    key: 'employee_id',    width: 16 },
+      { header: 'First Name',     key: 'first_name',     width: 18 },
+      { header: 'Last Name',      key: 'last_name',      width: 18 },
+      { header: 'Department',     key: 'department',     width: 20 },
+      { header: 'Position',       key: 'position',       width: 20 },
+      { header: 'Total Check-ins', key: 'total_checkins', width: 16 },
+      { header: 'Avg. Hours/Day', key: 'avg_hours',      width: 18 },
+      { header: 'Late Arrivals',  key: 'late_count',     width: 16 },
+    ];
+
+    styleHeaderRow(sheet.getRow(1));
+
+    result.rows.forEach((row, idx) => {
+      const dataRow = sheet.addRow({
+        employee_id: row.employee_id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        department: row.department || 'Unassigned',
+        position: row.position || '',
+        total_checkins: row.total_checkins,
+        avg_hours: row.avg_hours !== null ? Number(row.avg_hours) : 0,
+        late_count: row.late_count,
+      });
+      styleDataRow(dataRow, idx + 1);
+    });
+
+    const summaryRow = sheet.addRow({
+      employee_id: `Total Records: ${result.rows.length}`,
+    });
+    summaryRow.font = { bold: true, italic: true, color: { argb: 'FF555555' } };
+
+    const filename = `performance-report-${new Date().toISOString().split('T')[0]}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache');
+
+    await workbook.xlsx.write(res);
+    res.end();
+
+    logger.info('Performance Excel export generated', { userId: req.user.id, rowCount: result.rows.length });
+  } catch (error) {
+    logger.error('Excel performance export error', { error: error.message, userId: req.user?.id });
+    res.status(500).json({ success: false, message: 'Failed to generate performance export' });
   }
 });
 

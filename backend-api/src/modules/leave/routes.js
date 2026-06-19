@@ -90,13 +90,15 @@ router.post('/request', async (req, res) => {
     const initialStatus = isAdmin ? 'approved' : 'pending';
     const approverId = isAdmin ? req.user.id : null;
     const approvalTimestampSql = isAdmin ? 'NOW()' : 'NULL';
+    const attachmentData = typeof req.body.attachmentData === 'string' ? req.body.attachmentData : null;
+    const attachmentName = typeof req.body.attachmentName === 'string' ? req.body.attachmentName : null;
 
     const result = await query(
       `INSERT INTO leave_requests
-         (employee_id, supervisor_id, leave_type, start_date, end_date, total_days, reason, status, approver_id, approval_timestamp, approved_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ${approvalTimestampSql}, ${approvalTimestampSql})
+         (employee_id, supervisor_id, leave_type, start_date, end_date, total_days, reason, status, approver_id, approval_timestamp, approved_at, attachment_data, attachment_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ${approvalTimestampSql}, ${approvalTimestampSql}, $10, $11)
        RETURNING *`,
-      [req.user.id, supervisorId, leaveType, startDate, endDate, days, reason, initialStatus, approverId]
+      [req.user.id, supervisorId, leaveType, startDate, endDate, days, reason, initialStatus, approverId, attachmentData, attachmentName]
     );
 
     // If it's a supervisor requesting, notify their supervisor (Admin)
@@ -504,7 +506,10 @@ router.get('/stats', async (req, res) => {
          COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
          COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected,
          COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'vacation'), 0)::int AS vacation_days_used,
-         COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'sick'), 0)::int AS sick_days_used
+         COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'sick'), 0)::int AS sick_days_used,
+         COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'personal'), 0)::int AS personal_days_used,
+         COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'maternity'), 0)::int AS maternity_days_used,
+         COALESCE(SUM(total_days) FILTER (WHERE status = 'approved' AND leave_type = 'paternity'), 0)::int AS paternity_days_used
        FROM leave_requests
        WHERE employee_id = $1`,
       [req.user.id]
@@ -518,6 +523,9 @@ router.get('/stats', async (req, res) => {
       rejected: row.rejected,
       vacationDaysUsed: row.vacation_days_used,
       sickDaysUsed: row.sick_days_used,
+      personalDaysUsed: row.personal_days_used,
+      maternityDaysUsed: row.maternity_days_used,
+      paternityDaysUsed: row.paternity_days_used,
     });
   } catch (error) {
     logger.error('Leave stats error', { error: error.message, userId: req.user?.id });

@@ -501,11 +501,20 @@ router.get('/employees/locations', requireRole('admin'), async (req, res) => {
          el.longitude,
          el.radius_meters,
          el.is_active      AS location_is_active,
-         el.updated_at     AS location_updated_at
+         el.updated_at     AS location_updated_at,
+         wt.work_start_time,
+         wt.work_end_time,
+         wt.is_temporary   AS timing_is_temporary
        FROM employees e
        LEFT JOIN employee_locations el
          ON el.employee_id = e.id AND el.is_active = TRUE
-       WHERE e.employee_id != 'admin'
+       LEFT JOIN (
+         SELECT DISTINCT ON (employee_id)
+           employee_id, work_start_time, work_end_time, is_temporary
+         FROM work_timings
+         WHERE is_active = TRUE
+         ORDER BY employee_id, is_temporary DESC, id DESC
+       ) wt ON wt.employee_id = e.id
        ORDER BY e.first_name, e.last_name`
     );
 
@@ -621,6 +630,16 @@ router.post('/employees/:employeeId/location', requireRole('admin'), async (req,
       details: { employeeId: empResult.rows[0].employee_id, latitude: lat, longitude: lng, radius }
     });
 
+    // Broadcast live WebSocket update
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.notifyEmployee(empResult.rows[0].employee_id, 'location_timing_update', { type: 'location' });
+      }
+    } catch (wsErr) {
+      logger.warn('Failed to broadcast location assignment WS alert', { error: wsErr.message });
+    }
+
     res.json({
       success: true,
       data: result.rows[0],
@@ -667,6 +686,16 @@ router.delete('/employees/:employeeId/location', requireRole('admin'), async (re
       userAgent: req.headers['user-agent'],
       details: { employeeId: empResult.rows[0].employee_id }
     });
+
+    // Broadcast live WebSocket update
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.notifyEmployee(empResult.rows[0].employee_id, 'location_timing_update', { type: 'location' });
+      }
+    } catch (wsErr) {
+      logger.warn('Failed to broadcast location removal WS alert', { error: wsErr.message });
+    }
 
     res.json({
       success: true,
@@ -1137,6 +1166,21 @@ router.post('/work-timings', requireRole('admin'), async (req, res) => {
       details: { workStartTime, workEndTime, isTemporary, startDate, endDate }
     });
 
+    // Broadcast live WebSocket update
+    if (employeeId) {
+      try {
+        const empCodeRes = await query('SELECT employee_id FROM employees WHERE id = $1', [employeeId]);
+        if (empCodeRes.rows.length > 0) {
+          const io = req.app.get('io');
+          if (io) {
+            io.notifyEmployee(empCodeRes.rows[0].employee_id, 'location_timing_update', { type: 'timing' });
+          }
+        }
+      } catch (wsErr) {
+        logger.warn('Failed to broadcast work timing assignment WS alert', { error: wsErr.message });
+      }
+    }
+
     res.status(201).json({
       success: true,
       data: result.rows[0]
@@ -1177,6 +1221,21 @@ router.delete('/work-timings/:id', requireRole('admin'), async (req, res) => {
       userAgent: req.headers['user-agent'],
       details: { deletedTiming }
     });
+
+    // Broadcast live WebSocket update
+    if (deletedTiming.employee_id) {
+      try {
+        const empCodeRes = await query('SELECT employee_id FROM employees WHERE id = $1', [deletedTiming.employee_id]);
+        if (empCodeRes.rows.length > 0) {
+          const io = req.app.get('io');
+          if (io) {
+            io.notifyEmployee(empCodeRes.rows[0].employee_id, 'location_timing_update', { type: 'timing' });
+          }
+        }
+      } catch (wsErr) {
+        logger.warn('Failed to broadcast work timing deletion WS alert', { error: wsErr.message });
+      }
+    }
 
     res.json({
       success: true,
@@ -2736,6 +2795,82 @@ router.post('/configuration', requireRole('admin'), async (req, res) => {
   } catch (error) {
     await query('ROLLBACK');
     logger.error('Admin configuration update error', { error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /location-timing-requests
+router.get('/location-timing-requests', requireRole('admin'), async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT r.*, e.first_name, e.last_name, e.employee_id AS employee_id_code, e.department, e.role 
+       FROM location_timing_requests r
+       JOIN employees e ON r.employee_id = e.id
+       ORDER BY r.created_at DESC`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    logger.error('Failed to fetch location timing requests for admin', { error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /location-timing-requests/:requestId
+router.put('/location-timing-requests/:requestId', requireRole('admin'), async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { status, adminNotes } = req.body;
+    if (!status || !['approved', 'rejected', 'pending'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status value' });
+    }
+
+    const result = await query(
+      `UPDATE location_timing_requests
+       SET status = $1, admin_notes = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [status, adminNotes || null, requestId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const updatedRequest = result.rows[0];
+
+    // Fetch employee details to attach to socket notification
+    const empResult = await query(
+      'SELECT first_name, last_name, employee_id, department, role FROM employees WHERE id = $1',
+      [updatedRequest.employee_id]
+    );
+    let payload = { ...updatedRequest };
+    if (empResult.rows.length > 0) {
+      const emp = empResult.rows[0];
+      payload.first_name = emp.first_name;
+      payload.last_name = emp.last_name;
+      payload.employee_id_code = emp.employee_id;
+      payload.department = emp.department;
+      payload.role = emp.role;
+    }
+
+    // Broadcast live WebSocket updates
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        // Emit to admin room
+        io.to('admin').emit('location_timing_request_updated', payload);
+        // Emit to supervisors room
+        io.to('supervisors').emit('location_timing_request_updated', payload);
+        // Also notify the specific employee
+        io.notifyEmployee(payload.employee_id_code, 'location_timing_request_updated', payload);
+      }
+    } catch (wsErr) {
+      logger.warn('Failed to broadcast location timing request status update WS alert', { error: wsErr.message });
+    }
+
+    res.json({ success: true, data: payload });
+  } catch (error) {
+    logger.error('Failed to update location timing request status', { error: error.message });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
