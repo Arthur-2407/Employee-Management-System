@@ -147,6 +147,15 @@ router.post('/employees', requireRole('admin'), async (req, res) => {
     const actualPassword = (password && String(password).trim() !== '') ? String(password) : String(employeeId);
     const passwordHash = await bcrypt.hash(actualPassword, 10);
 
+    // Resolve supervisor_id for supervisors to report to admin by default
+    let actualSupervisorId = supervisorId || null;
+    if (role === 'supervisor' && !actualSupervisorId) {
+      const adminRes = await query("SELECT id FROM employees WHERE role = 'admin' LIMIT 1");
+      if (adminRes.rows.length > 0) {
+        actualSupervisorId = adminRes.rows[0].id;
+      }
+    }
+
     // Insert employee
     const result = await query(
       `INSERT INTO employees (
@@ -157,7 +166,7 @@ router.post('/employees', requireRole('admin'), async (req, res) => {
       RETURNING id, employee_id, first_name, last_name, email, role`,
       [
         employeeId, firstName, lastName, email, phoneNumber || null,
-        department, position, role, supervisorId || null, hireDate,
+        department, position, role, actualSupervisorId, hireDate,
         passwordHash
       ]
     );
@@ -1272,10 +1281,10 @@ router.get('/hierarchy', requireRole('admin'), async (req, res) => {
          ) FILTER (WHERE e.id IS NOT NULL) AS assigned_employees,
          COUNT(DISTINCT e.id) FILTER (WHERE e.is_active = TRUE) AS active_employee_count
        FROM employees s
-       LEFT JOIN employees e ON (s.id = e.supervisor_id OR EXISTS (
+       LEFT JOIN employees e ON ((s.id = e.supervisor_id OR EXISTS (
          SELECT 1 FROM supervisor_assignments sa 
          WHERE sa.supervisor_id = s.id AND sa.employee_id = e.id AND sa.is_active = TRUE
-       )) AND e.is_active = TRUE
+       )) OR (s.role = 'admin' AND e.role = 'supervisor')) AND e.is_active = TRUE
        WHERE s.role IN ('supervisor', 'admin') AND s.is_active = TRUE
        GROUP BY s.id, s.employee_id, s.first_name, s.last_name, s.email, s.department
        ORDER BY s.first_name, s.last_name`
@@ -1757,13 +1766,13 @@ router.post('/supervisors', requireRole('admin'), async (req, res) => {
       ? await bcrypt.hash(password, 10)
       : await bcrypt.hash(uuidv4().slice(0, 16), 10); // Generate random if not provided
 
-    // Insert supervisor (note: no supervisor_id for supervisors themselves)
+    // Insert supervisor (automatically report to admin)
     const result = await query(
       `INSERT INTO employees (
         employee_id, first_name, last_name, email, phone_number,
-        department, position, role, hire_date,
+        department, position, role, supervisor_id, hire_date,
         password_hash, is_active, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'supervisor', $8, $9, TRUE, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'supervisor', (SELECT id FROM employees WHERE role = 'admin' LIMIT 1), $8, $9, TRUE, NOW(), NOW())
       RETURNING id, employee_id, first_name, last_name, email, department, role`,
       [
         employeeId, firstName, lastName, email, phoneNumber || null,

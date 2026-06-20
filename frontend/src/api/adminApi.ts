@@ -253,4 +253,17 @@ export const adminApi = {
   ): Promise<AxiosResponse<{ success: boolean; data: any }>> => {
     return api.put(`/admin/location-timing-requests/${requestId}`, data);
   },
+
+  // Account recovery requests
+  getPendingRecoveries: async (): Promise<AxiosResponse<{ success: boolean; data: any[] }>> => {
+    return api.get('/auth/recovery/pending');
+  },
+
+  approveRecovery: async (id: number, notes?: string): Promise<AxiosResponse<any>> => {
+    return api.post(`/auth/recovery/${id}/approve`, { notes });
+  },
+
+  rejectRecovery: async (id: number, reason?: string): Promise<AxiosResponse<any>> => {
+    return api.post(`/auth/recovery/${id}/reject`, { reason });
+  },
 };

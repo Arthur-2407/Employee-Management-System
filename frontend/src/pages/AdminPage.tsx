@@ -936,10 +936,14 @@ const AdminPage: React.FC = () => {
 
   // Approvals queue states
   const [pendingRequests, setPendingRequests] = useState<FaceChangeRequest[]>([]);
+  const [pendingRecoveries, setPendingRecoveries] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<FaceAuditLog[]>([]);
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [rejectingId, setRejectingId] = useState<number | null>(null);
+  const [approvingRecoveryId, setApprovingRecoveryId] = useState<number | null>(null);
+  const [rejectingRecoveryId, setRejectingRecoveryId] = useState<number | null>(null);
   const [actionNotes, setActionNotes] = useState<string>('');
+  const [recoveryNotes, setRecoveryNotes] = useState<string>('');
   const [pendingLeaveRequests, setPendingLeaveRequests] = useState<LeaveRequest[]>([]);
   const [approvingLeaveId, setApprovingLeaveId] = useState<number | null>(null);
   const [rejectingLeaveId, setRejectingLeaveId] = useState<number | null>(null);
@@ -1147,13 +1151,14 @@ const AdminPage: React.FC = () => {
     const isSilent = typeof silent === 'boolean' ? silent : false;
     if (!isSilent) setLoading(true);
     try {
-      const [empResult, hierarchyResult, timingsResult, pendingResult, logsResult, leaveResult] = await Promise.allSettled([
+      const [empResult, hierarchyResult, timingsResult, pendingResult, logsResult, leaveResult, recoveryResult] = await Promise.allSettled([
         adminApi.getEmployees({ limit: 200 }),
         adminApi.getHierarchy(),
         adminApi.getWorkTimings(),
         faceManagementApi.getPendingRequests(),
         faceManagementApi.getHistory(),
         leaveApi.getTeamRequests(200),
+        adminApi.getPendingRecoveries(),
       ]);
 
       if (empResult.status === 'fulfilled') {
@@ -1180,6 +1185,10 @@ const AdminPage: React.FC = () => {
 
       if (leaveResult.status === 'fulfilled') {
         setPendingLeaveRequests((leaveResult.value.data || []).filter((r: LeaveRequest) => r.status === 'pending'));
+      }
+
+      if (recoveryResult && recoveryResult.status === 'fulfilled' && recoveryResult.value.data.success) {
+        setPendingRecoveries(recoveryResult.value.data.data);
       }
     } catch (err) {
       console.error('Admin data fetch error:', err);
@@ -1318,6 +1327,38 @@ const AdminPage: React.FC = () => {
     } catch (err: any) {
       showError(err.response?.data?.message || 'Failed to reject request');
       setRejectingId(null);
+    }
+  };
+
+  const handleApproveRecovery = async (id: number) => {
+    try {
+      setApprovingRecoveryId(id);
+      const response = await adminApi.approveRecovery(id, recoveryNotes);
+      if (response.data.success) {
+        showSuccess('Account recovery request approved successfully!');
+        setRecoveryNotes('');
+        setApprovingRecoveryId(null);
+        fetchData();
+      }
+    } catch (err: any) {
+      showError(err.response?.data?.message || 'Failed to approve recovery request');
+      setApprovingRecoveryId(null);
+    }
+  };
+
+  const handleRejectRecovery = async (id: number) => {
+    try {
+      setRejectingRecoveryId(id);
+      const response = await adminApi.rejectRecovery(id, recoveryNotes);
+      if (response.data.success) {
+        showSuccess('Account recovery request rejected successfully!');
+        setRecoveryNotes('');
+        setRejectingRecoveryId(null);
+        fetchData();
+      }
+    } catch (err: any) {
+      showError(err.response?.data?.message || 'Failed to reject recovery request');
+      setRejectingRecoveryId(null);
     }
   };
 
@@ -2629,6 +2670,117 @@ const AdminPage: React.FC = () => {
                                   onClick={() => {
                                     setRejectingId(request.id);
                                     setApprovingId(null);
+                                  }}
+                                  className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── PENDING BIOMETRIC RECOVERY REQUESTS ── */}
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                    <div>
+                      <h2 className="text-xl font-bold text-gray-900">Pending Biometric Recovery Requests</h2>
+                      <p className="text-gray-500 text-sm mt-0.5">Review and approve biometric and credential recovery requests submitted by lock-out employees or supervisors.</p>
+                    </div>
+                    <button
+                      onClick={fetchData}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm transition-colors"
+                    >
+                      <FaSync className="text-xs animate-spin-hover" /> Refresh
+                    </button>
+                  </div>
+
+                  {pendingRecoveries.length === 0 ? (
+                    <div className="py-12 text-center text-gray-500">
+                      <FaCheck className="mx-auto text-4xl text-green-300 mb-3" />
+                      <p>No pending biometric recovery requests.</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-gray-200">
+                      {pendingRecoveries.map((recovery) => (
+                        <div key={recovery.id} className="p-6 flex flex-col md:flex-row md:items-center md:justify-between hover:bg-gray-50 transition-colors">
+                          <div className="mb-4 md:mb-0">
+                            <div className="flex items-center space-x-3">
+                              <span className="font-semibold text-gray-900">{recovery.first_name} {recovery.last_name}</span>
+                              <span className="text-xs text-gray-500">({recovery.employee_id})</span>
+                              <span className={`px-2 py-0.5 text-xs rounded-full font-bold ${
+                                recovery.request_type === 'face_reset' 
+                                  ? 'bg-amber-100 text-amber-800' 
+                                  : recovery.request_type === 'password_reset' 
+                                    ? 'bg-blue-100 text-blue-800' 
+                                    : 'bg-purple-100 text-purple-800'
+                              }`}>
+                                {recovery.request_type === 'face_reset' 
+                                  ? 'FACE RESET' 
+                                  : recovery.request_type === 'password_reset'
+                                    ? 'PASSWORD RESET'
+                                    : 'FULL CREDENTIAL RESET'}
+                              </span>
+                            </div>
+                            <div className="text-sm text-gray-700 mt-1.5 bg-gray-50 p-2 rounded-lg border border-gray-100 max-w-2xl">
+                              <strong className="text-xs text-gray-500 uppercase tracking-wider block mb-0.5">Reason:</strong>
+                              <span className="italic">"{recovery.request_reason || 'No reason provided'}"</span>
+                            </div>
+                            <div className="text-xs text-gray-500 mt-2">
+                              Email: {recovery.email} &bull; Requested on {new Date(recovery.created_at).toLocaleDateString()} &bull; Expires on {new Date(recovery.expires_at).toLocaleDateString()}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col sm:flex-row sm:items-center space-y-2 sm:space-y-0 sm:space-x-3">
+                            {approvingRecoveryId === recovery.id || rejectingRecoveryId === recovery.id ? (
+                              <div className="flex flex-col space-y-2 w-full sm:w-64">
+                                <input
+                                  type="text"
+                                  placeholder="Add notes/reason (optional)..."
+                                  value={recoveryNotes}
+                                  onChange={(e) => setRecoveryNotes(e.target.value)}
+                                  className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-full focus:ring-1 focus:ring-blue-500"
+                                />
+                                <div className="flex justify-end space-x-2">
+                                  <button
+                                    onClick={() => {
+                                      setApprovingRecoveryId(null);
+                                      setRejectingRecoveryId(null);
+                                      setRecoveryNotes('');
+                                    }}
+                                    className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs rounded-lg font-medium"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => approvingRecoveryId === recovery.id ? handleApproveRecovery(recovery.id) : handleRejectRecovery(recovery.id)}
+                                    className={`px-3 py-1 text-white text-xs rounded-lg font-medium ${
+                                      approvingRecoveryId === recovery.id ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
+                                    }`}
+                                  >
+                                    Confirm
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setApprovingRecoveryId(recovery.id);
+                                    setRejectingRecoveryId(null);
+                                  }}
+                                  className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg text-sm font-medium transition-colors"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setRejectingRecoveryId(recovery.id);
+                                    setApprovingRecoveryId(null);
                                   }}
                                   className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors"
                                 >

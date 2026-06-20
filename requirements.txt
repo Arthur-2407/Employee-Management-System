@@ -1,52 +1,49 @@
 # AI Core
-tensorflow==2.16.1
-keras==3.0.5
 numpy==1.26.4
 
 # PyTorch
-torch==2.2.2
-torchvision==0.17.2
+torch==2.2.0
+torchvision==0.17.0
 
-# Computer Vision (use ONLY headless)
+# Computer Vision (use ONLY headless for production)
 opencv-python-headless==4.9.0.80
 
-# Face AI
-deepface==0.0.92
+# Face AI & Embeddings (PRODUCTION - all actively used in code)
+insightface==0.7.3
 facenet-pytorch==2.6.0
 mediapipe==0.10.14
-retina-face==0.0.17
+onnxruntime==1.18.0
 
-# Data
+# Data Processing
 pandas==2.2.1
 scikit-learn==1.4.1.post1
-scikit-image==0.22.0
 scipy==1.12.0
 matplotlib==3.8.3
 
-# Backend
+# Web Framework
 flask==3.0.2
 flask-cors==4.0.0
 flask-socketio==5.3.6
 eventlet==0.35.2
-fastapi==0.110.0
-uvicorn==0.27.1
 
-# Utils
+# API & Validation
+pydantic==2.5.0
+python-multipart==0.0.6
+
+# Utils & Dependencies
 pillow==10.2.0
 pyyaml==6.0.1
 python-dotenv==1.0.1
 redis==5.0.3
 requests==2.31.0
-
-# Networking / Socket
 python-socketio>=5.0.2
 python-engineio>=4.0.0
 
-# Required fixes
-Werkzeug>=3.0.0
+# Security & Encryption
+cryptography==41.0.7
+
+# System & Network
 greenlet==3.0.3
 dnspython==2.6.1
 six==1.17.0
-pytest 
-black 
-flake8
+Werkzeug>=3.0.0

@@ -71,7 +71,7 @@
         "attendance_records": "Check-in/check-out logs with geofence data",
         "security_events": "Audit trail for authentication attempts",
         "token_blacklist": "Revoked tokens for logout enforcement"
-      ]
+      }
     },
     "deployment": {
       "docker": {

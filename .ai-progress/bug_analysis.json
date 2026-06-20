@@ -106,7 +106,7 @@
         "issue5": "Stream might not be ready when video element tries to draw",
         "issue6": "Double-mount in StrictMode might start camera twice or cause cleanup races",
         "issue7": "Video dimensions might be 0 when canvas tries to draw"
-      ],
+      },
       "currentFlow": {
         "mount": "FaceCamera mounts → startCamera() if autoCapture=true",
         "stream": "useCamera creates MediaStream and sets stream state",
