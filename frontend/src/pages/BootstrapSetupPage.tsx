@@ -204,11 +204,18 @@ const BootstrapSetupPage = () => {
         setErrorMessage(res.data.error || 'Failed to complete setup');
       }
     } catch (err: any) {
-      const isUnavailable = err.response?.status === 503 || err.response?.data?.code === 'FACE_AI_UNAVAILABLE';
-      if (isUnavailable) {
+      const status = err.response?.status;
+      const code = err.response?.data?.code;
+      const backendError = err.response?.data?.error;
+
+      const isServiceDown = status === 503 && code === 'FACE_AI_UNAVAILABLE' && !backendError?.includes('No face') && !backendError?.includes('frame');
+      if (isServiceDown) {
         setErrorMessage(
           'Face-AI Service Unavailable: Please start the face-recognition service and ensure it is healthy before completing setup.'
         );
+      } else if (backendError) {
+        // Surface the exact backend message (no face detected, bad frames, etc.)
+        setErrorMessage(backendError);
       } else {
         setErrorMessage(err.response?.data?.error || err.message || 'An error occurred during setup.');
       }

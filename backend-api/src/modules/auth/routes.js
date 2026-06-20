@@ -1432,6 +1432,8 @@ router.post('/bootstrap/setup', async (req, res) => {
     let embeddingVector = null;
     let confidenceScore = 1.0;
     let modelVersion = '1.0';
+    let faceAiErrorCode = null;
+    let faceAiErrorMessage = null;
 
     try {
       const faceAIServiceUrl = process.env.FACE_AI_SERVICE_URL || 'http://face-ai-service:8000';
@@ -1451,7 +1453,24 @@ router.post('/bootstrap/setup', async (req, res) => {
         }
       }
     } catch (err) {
-      logger.error('[Bootstrap] Face AI service unavailable during admin bootstrap', { error: err.message });
+      const httpStatus = err.response && err.response.status;
+      const aiCode = err.response && err.response.data && err.response.data.code;
+      const aiError = err.response && err.response.data && err.response.data.error;
+
+      if (httpStatus && httpStatus >= 400 && httpStatus < 500) {
+        // Service IS reachable but rejected the frames — capture the real reason
+        faceAiErrorCode = aiCode || 'FACE_REGISTRATION_FAILED';
+        faceAiErrorMessage = aiError || 'Face registration failed';
+        logger.warn('[Bootstrap] Face AI rejected frames during admin bootstrap', {
+          httpStatus, aiCode, aiError,
+        });
+      } else {
+        // True service unavailability: network error, timeout, 5xx
+        faceAiErrorCode = 'FACE_AI_UNAVAILABLE';
+        logger.error('[Bootstrap] Face AI service unavailable during admin bootstrap', {
+          error: err.message, code: err.code, httpStatus,
+        });
+      }
     }
 
     // ZERO SYNTHETIC DATA POLICY: Do NOT use Math.sin or any mock vectors.
@@ -1459,10 +1478,30 @@ router.post('/bootstrap/setup', async (req, res) => {
     // The admin must perform bootstrap with a working Face-AI service.
     if (!embeddingVector) {
       if (res.headersSent) return;
-      return res.status(503).json({
+
+      // Build a user-friendly message based on what the face-ai service reported
+      let userFacingError;
+      if (faceAiErrorCode === 'NO_FACE_DETECTED') {
+        userFacingError = 'No face was detected in the captured frames. Please ensure your face is clearly visible, well-lit, and centred in the camera frame, then try again.';
+      } else if (faceAiErrorCode === 'INVALID_FRAMES') {
+        userFacingError = 'The captured frames could not be processed. Please retake your face photo and try again.';
+      } else if (faceAiErrorCode === 'MULTIPLE_FACES_DETECTED') {
+        userFacingError = 'Multiple faces were detected in the frame. Please ensure only your face is visible in the camera, then try again.';
+      } else if (faceAiErrorCode === 'MOCK_BYPASS_FORBIDDEN') {
+        userFacingError = 'Mock bypass is not permitted in production mode. Please capture a real face image.';
+      } else if (faceAiErrorCode === 'FACE_AI_UNAVAILABLE') {
+        userFacingError = 'Face recognition service did not return a valid face embedding. Ensure the Face-AI service is running and accessible before completing bootstrap setup.';
+      } else if (faceAiErrorMessage) {
+        userFacingError = `Face registration failed: ${faceAiErrorMessage}. Please retake your face photo and try again.`;
+      } else {
+        userFacingError = 'Face recognition service did not return a valid face embedding. Ensure the Face-AI service is running and accessible before completing bootstrap setup.';
+      }
+
+      const httpStatus = faceAiErrorCode === 'FACE_AI_UNAVAILABLE' ? 503 : 422;
+      return res.status(httpStatus).json({
         success: false,
-        error: 'Face recognition service did not return a valid face embedding. Ensure the Face-AI service is running and accessible before completing bootstrap setup.',
-        code: 'FACE_AI_UNAVAILABLE',
+        error: userFacingError,
+        code: faceAiErrorCode || 'FACE_AI_UNAVAILABLE',
       });
     }
 
