@@ -1217,7 +1217,7 @@ const AdminPage: React.FC = () => {
         fetchLeaveRequests();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to approve leave request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to approve leave request');
       setApprovingLeaveId(null);
     }
   };
@@ -1237,7 +1237,7 @@ const AdminPage: React.FC = () => {
         fetchLeaveRequests();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to reject leave request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to reject leave request');
       setRejectingLeaveId(null);
     }
   };
@@ -1277,7 +1277,7 @@ const AdminPage: React.FC = () => {
         showError(response.data.message || 'Failed to register face.');
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Error occurred during registration.');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Error occurred during registration.');
     } finally {
       setIsDirectFaceSubmitting(false);
     }
@@ -1294,7 +1294,7 @@ const AdminPage: React.FC = () => {
         showError(response.data.message || 'Failed to delete face.');
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Error occurred during deletion.');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Error occurred during deletion.');
     }
   };
 
@@ -1309,7 +1309,7 @@ const AdminPage: React.FC = () => {
         fetchData();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to approve request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to approve request');
       setApprovingId(null);
     }
   };
@@ -1325,7 +1325,7 @@ const AdminPage: React.FC = () => {
         fetchData();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to reject request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to reject request');
       setRejectingId(null);
     }
   };
@@ -1341,7 +1341,7 @@ const AdminPage: React.FC = () => {
         fetchData();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to approve recovery request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to approve recovery request');
       setApprovingRecoveryId(null);
     }
   };
@@ -1357,7 +1357,7 @@ const AdminPage: React.FC = () => {
         fetchData();
       }
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to reject recovery request');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to reject recovery request');
       setRejectingRecoveryId(null);
     }
   };
@@ -1448,8 +1448,15 @@ const AdminPage: React.FC = () => {
 
   // Create employee handler
   const handleCreateEmployee = async () => {
-    if (!createForm.employeeId || !createForm.firstName || !createForm.lastName || !createForm.email) {
-      showError('Employee ID, name, and email are required');
+    if (
+      !createForm.employeeId ||
+      !createForm.firstName ||
+      !createForm.lastName ||
+      !createForm.email ||
+      !createForm.department ||
+      !createForm.position
+    ) {
+      showError('Employee ID, name, email, department, and position are required');
       return;
     }
 
@@ -1473,7 +1480,7 @@ const AdminPage: React.FC = () => {
       setCreateForm(INITIAL_FORM);
       fetchData();
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to create employee');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to create employee');
     } finally {
       setFormLoading(false);
     }
@@ -1487,7 +1494,7 @@ const AdminPage: React.FC = () => {
       showSuccess(`${emp.first_name} ${emp.last_name} has been deactivated`);
       fetchData();
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to deactivate employee');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to deactivate employee');
     }
   };
 
@@ -1498,7 +1505,7 @@ const AdminPage: React.FC = () => {
       showSuccess(`${emp.first_name} ${emp.last_name} has been activated successfully`);
       fetchData();
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to activate employee');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to activate employee');
     }
   };
 
@@ -1510,7 +1517,7 @@ const AdminPage: React.FC = () => {
       showSuccess(`Employee ${emp.first_name} ${emp.last_name} removed successfully`);
       fetchData();
     } catch (err: any) {
-      showError(err.response?.data?.message || 'Failed to remove employee');
+      showError(err.response?.data?.error || err.response?.data?.message || 'Failed to remove employee');
     }
   };
 
@@ -2553,7 +2560,7 @@ const AdminPage: React.FC = () => {
                                         showSuccess(`MFA reset successfully for ${emp.first_name} ${emp.last_name}`);
                                         fetchData();
                                       } catch (err: any) {
-                                        showError(err.response?.data?.message || 'Failed to reset MFA');
+                                        showError(err.response?.data?.error || err.response?.data?.message || 'Failed to reset MFA');
                                       }
                                     }}
                                     className="px-3 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded text-xs font-medium transition-colors"
@@ -3073,7 +3080,7 @@ const AdminPage: React.FC = () => {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Department *</label>
                     <input
                       id="new-department"
                       type="text"
@@ -3087,7 +3094,7 @@ const AdminPage: React.FC = () => {
                     </datalist>
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Position</label>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Position *</label>
                     <input
                       id="new-position"
                       type="text"

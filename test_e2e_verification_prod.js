@@ -205,10 +205,10 @@ async function runAllTests() {
   // STEP 4: RESTART APPLICATION AND VERIFY BOOTSTRAP LOCK
   console.log('\n--- STEP 4: RESTARTING BACKEND CONTAINER & VERIFYING BOOTSTRAP LOCK ---');
   try {
-    console.log('Restarting backend-api container...');
-    execSync('docker restart backend-api', { stdio: 'inherit' });
-    console.log('Restarting attendance-nginx container to refresh upstream DNS...');
-    execSync('docker restart attendance-nginx', { stdio: 'inherit' });
+    console.log('Restarting backend-api-prod container...');
+    execSync('docker restart backend-api-prod', { stdio: 'inherit' });
+    console.log('Restarting attendance-nginx-prod container to refresh upstream DNS...');
+    execSync('docker restart attendance-nginx-prod', { stdio: 'inherit' });
     console.log('Waiting 20 seconds for containers to recover...');
     await waitMs(20000);
   } catch (err) {
