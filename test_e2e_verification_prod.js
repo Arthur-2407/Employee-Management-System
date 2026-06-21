@@ -31,6 +31,8 @@ function runFaceQuery(sql) {
 // Load real synthetic frames for production testing
 const syntheticFrames = JSON.parse(fs.readFileSync('synthetic_frames.json', 'utf8'));
 const dummyFrames = syntheticFrames.slice(0, 10);
+const dummyBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
 
 async function waitMs(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -124,7 +126,7 @@ async function runAllTests() {
   // STEP 1: FRESH DATABASE SETUP
   console.log('\n--- STEP 1: RESETING DATABASE TO FRESH STATE ---');
   try {
-    runFaceQuery('TRUNCATE face_embeddings CASCADE;');
+    runFaceQuery('TRUNCATE face_embeddings, user_images, users CASCADE;');
     try {
       runQuery('DELETE FROM face_embeddings;');
     } catch (e) {}

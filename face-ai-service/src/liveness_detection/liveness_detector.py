@@ -76,7 +76,7 @@ class LivenessDetector:
         )
 
         # Overall liveness confidence threshold (used by pipeline, mirrored here)
-        self.liveness_threshold = float(os.getenv("FACE_AI_LIVENESS_THRESHOLD", "0.55"))
+        self.liveness_threshold = float(os.getenv("FACE_AI_LIVENESS_THRESHOLD", "0.65"))
 
         logger.info(
             "LivenessDetector initialised | ear=%.2f head_move=%.3f "
@@ -489,17 +489,21 @@ class LivenessDetector:
             "flow_natural":  0.30,
         }
 
-        # Blink: partial credit even without blink (short sequence)
+        # Check if the primary video-replay/spoof defenses are passed
+        primary_defenses_passed = micro_texture["is_live"] and flow_naturalness["is_live"]
+
+        # Blink: fallback to 0.75 if primary defenses are passed, otherwise 0.0
         blink_conf = min(blink_analysis["blink_count"] / 2.0, 1.0) \
-            if blink_analysis["blink_detected"] else 0.15
+            if blink_analysis["blink_detected"] else (0.75 if primary_defenses_passed else 0.0)
 
-        # Head movement
+        # Head movement: fallback to 0.75 if primary defenses are passed, otherwise 0.0
         head_conf = min(head_movement["movement_magnitude"] / 0.05, 1.0) \
-            if head_movement["movement_detected"] else 0.10
+            if head_movement["movement_detected"] else (0.75 if primary_defenses_passed else 0.0)
 
-        # Depth variation
+        # Depth variation: fallback to 0.75 if primary defenses are passed, otherwise 0.0
         depth_conf = min(depth_variation["variation_score"] / 0.15, 1.0) \
-            if depth_variation["variation_detected"] else 0.10
+            if depth_variation["variation_detected"] else (0.75 if primary_defenses_passed else 0.0)
+
 
         # Micro-texture: binary live/not — but scale by variance level
         if micro_texture["is_live"]:
@@ -507,7 +511,7 @@ class LivenessDetector:
             micro_conf = min(var / (self.MICRO_TEXTURE_VAR_THRESHOLD * 5), 1.0)
             micro_conf = max(micro_conf, 0.6)
         else:
-            micro_conf = 0.05
+            micro_conf = 0.0
 
         # Optical flow naturalness: scale by entropy
         if flow_naturalness["is_live"]:
@@ -515,7 +519,7 @@ class LivenessDetector:
             flow_conf = min(entropy / (self.FLOW_ENTROPY_THRESHOLD * 1.5), 1.0)
             flow_conf = max(flow_conf, 0.6)
         else:
-            flow_conf = 0.05
+            flow_conf = 0.0
 
         confidence = (
             blink_conf    * weights["blink"] +

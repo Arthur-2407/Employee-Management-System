@@ -33,6 +33,17 @@ async function main() {
     `, [adminId]);
     console.log('Deactivated face embeddings:', deactivateResult.rowCount);
 
+    // Also delete any stored images and user record in face DB
+    const deleteImages = await facePool.query(`
+      DELETE FROM user_images WHERE user_id = $1
+    `, [adminId]);
+    console.log('Deleted user images:', deleteImages.rowCount);
+
+    const deleteUser = await facePool.query(`
+      DELETE FROM users WHERE user_id = $1
+    `, [adminId]);
+    console.log('Deleted user record:', deleteUser.rowCount);
+
     // Mark admin as face_enrolled = FALSE to trigger bootstrap mode
     const enrollResult = await pool.query(`
       UPDATE employees 

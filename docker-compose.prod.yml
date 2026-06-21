@@ -144,6 +144,14 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redispassword123}@redis:6379
       - MODEL_PATH=/app/models
       - TORCH_HOME=/app/models
+      # ── Biometric threshold overrides from .env (must be forwarded explicitly) ──
+      - FACE_AI_LIVENESS_THRESHOLD=${FACE_AI_LIVENESS_THRESHOLD:-0.55}
+      - FACE_AI_SPOOF_THRESHOLD=${FACE_AI_SPOOF_THRESHOLD:-0.55}
+      - FACE_AI_SIMILARITY_THRESHOLD=${FACE_AI_SIMILARITY_THRESHOLD:-0.70}
+      - FACE_AI_FLOW_ENTROPY_THRESHOLD=${FACE_AI_FLOW_ENTROPY_THRESHOLD:-1.5}
+      - FACE_AI_MICRO_TEXTURE_VAR_THRESHOLD=${FACE_AI_MICRO_TEXTURE_VAR_THRESHOLD:-0.00015}
+      - FACE_AI_EAR_THRESHOLD=${FACE_AI_EAR_THRESHOLD:-0.25}
+      - FACE_AI_HEAD_MOVEMENT_THRESHOLD=${FACE_AI_HEAD_MOVEMENT_THRESHOLD:-0.02}
     volumes:
       - face_ai_models:/app/models
       - face_ai_logs:/app/logs

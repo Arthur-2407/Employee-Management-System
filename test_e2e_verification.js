@@ -124,7 +124,7 @@ async function runAllTests() {
   // STEP 1: FRESH DATABASE SETUP
   console.log('\n--- STEP 1: RESETING DATABASE TO FRESH STATE ---');
   try {
-    runFaceQuery('TRUNCATE face_embeddings CASCADE;');
+    runFaceQuery('TRUNCATE face_embeddings, user_images, users CASCADE;');
     try {
       runQuery('DELETE FROM face_embeddings;');
     } catch (e) {}

@@ -87,15 +87,15 @@ class SpoofDetector:
         # ── Temporal consistency (optical flow) ─────────────────────────
         # Mean optical flow magnitude below this → static (photo attack)
         self.temporal_static_threshold = float(
-            os.getenv("FACE_AI_TEMPORAL_STATIC_THRESHOLD", "0.15")
+            os.getenv("FACE_AI_TEMPORAL_STATIC_THRESHOLD", "0.25")
         )
         # Flow periodicity score above this → looping video replay
         self.temporal_periodic_threshold = float(
-            os.getenv("FACE_AI_TEMPORAL_PERIODIC_THRESHOLD", "0.70")
+            os.getenv("FACE_AI_TEMPORAL_PERIODIC_THRESHOLD", "0.55")
         )
 
         # ── Overall spoof decision threshold ────────────────────────────
-        self.spoof_threshold = float(os.getenv("FACE_AI_SPOOF_THRESHOLD", "0.65"))
+        self.spoof_threshold = float(os.getenv("FACE_AI_SPOOF_THRESHOLD", "0.55"))
 
         logger.info(
             "SpoofDetector initialised | thresholds: texture=%.2f glare_area=%.2f "
