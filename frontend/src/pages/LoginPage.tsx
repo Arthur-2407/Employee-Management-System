@@ -6,6 +6,7 @@ import {
   FaArrowRight, FaExclamationTriangle, FaCheckCircle, FaSpinner,
   FaEnvelope,
 } from 'react-icons/fa';
+import FaceCamera from '@components/camera/FaceCamera';
 import { useAuth } from '@contexts/AuthContext';
 import { useNotification } from '@contexts/NotificationContext';
 import type { User } from '@contexts/AuthContext';
@@ -25,6 +26,12 @@ interface PreLoginData {
   needs_recovery: boolean;
   account_locked: boolean;
   locked_until: string | null;
+  recovery_request?: {
+    id: number;
+    status: 'pending' | 'approved' | 'rejected' | 'completed' | 'expired';
+    request_type: 'password_reset' | 'face_reset' | 'full_credential_reset';
+    review_notes: string | null;
+  } | null;
 }
 
 type LoginStep = 'id_entry' | 'checking' | 'password' | 'face_required' | 'locked' | 'recovery_needed';
@@ -44,6 +51,51 @@ const LoginPage: React.FC = () => {
   const [preLoginData, setPreLoginData] = useState<PreLoginData | null>(null);
   const [idError, setIdError] = useState('');
   const [adminContact, setAdminContact] = useState<{ name: string; email: string | null; mailtoLink: string | null } | null>(null);
+
+  // Recovery states
+  const [recoveryFrames, setRecoveryFrames] = useState<string[]>([]);
+  const [isRecoverySubmitting, setIsRecoverySubmitting] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
+  const [recoverySuccess, setRecoverySuccess] = useState(false);
+
+  const handleRecoveryFrameCapture = useCallback((frame: string) => {
+    const base64Data = frame.includes(',') ? frame.split(',')[1] : frame;
+    setRecoveryFrames(prev => {
+      if (prev.length < 15 && !recoverySuccess) {
+        return [...prev, base64Data];
+      }
+      return prev;
+    });
+  }, [recoverySuccess]);
+
+  useEffect(() => {
+    if (recoveryFrames.length >= 15 && !isRecoverySubmitting && !recoverySuccess) {
+      const submitFrames = async () => {
+        setIsRecoverySubmitting(true);
+        setRecoveryError('');
+        try {
+          const res = await api.post('/auth/recovery/reset', {
+            employeeId,
+            recoveryId: preLoginData?.recovery_request?.id,
+            frames: recoveryFrames,
+          });
+          if (res.data.success) {
+            setRecoverySuccess(true);
+            showSuccess('Face profile registered successfully!');
+          } else {
+            setRecoveryError(res.data.message || 'Failed to submit face registration.');
+            setRecoveryFrames([]);
+          }
+        } catch (err: any) {
+          setRecoveryError(err.response?.data?.message || 'Failed to complete recovery. Please try again.');
+          setRecoveryFrames([]);
+        } finally {
+          setIsRecoverySubmitting(false);
+        }
+      };
+      submitFrames();
+    }
+  }, [recoveryFrames, isRecoverySubmitting, recoverySuccess, employeeId, preLoginData?.recovery_request?.id, showSuccess]);
 
   // ── Bootstrap check + admin contact info (loaded once on mount) ──
   useEffect(() => {
@@ -297,25 +349,172 @@ const LoginPage: React.FC = () => {
               {/* ── Step: Recovery Needed ── */}
               {step === 'recovery_needed' && (
                 <motion.div key="recovery" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="py-4">
-                  <FaExclamationTriangle className="mx-auto text-4xl text-amber-500 mb-3 block text-center w-full" />
-                  <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Credentials Missing</h3>
-                  <p className="text-gray-600 text-sm mb-4 text-center">
-                    Some required credentials for your account are missing:
-                  </p>
-                  {preLoginData?.missing_credentials && (
-                    <ul className="list-disc list-inside text-sm text-red-600 mb-4 bg-red-50 rounded-lg p-3">
-                      {preLoginData.missing_credentials.map((c) => <li key={c}>{c}</li>)}
-                    </ul>
+                  {!preLoginData?.recovery_request ? (
+                    /* Case 1: No request submitted yet */
+                    <>
+                      <FaExclamationTriangle className="mx-auto text-4xl text-amber-500 mb-3 block text-center w-full" />
+                      <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Credentials Missing</h3>
+                      <p className="text-gray-600 text-sm mb-4 text-center">
+                        Some required credentials for your account are missing:
+                      </p>
+                      {preLoginData?.missing_credentials && (
+                        <ul className="list-disc list-inside text-sm text-red-600 mb-4 bg-red-50 rounded-lg p-3">
+                          {preLoginData.missing_credentials.map((c) => <li key={c}>{c}</li>)}
+                        </ul>
+                      )}
+                      <p className="text-xs text-gray-500 text-center mb-4">Please contact your administrator to recover your credentials, or submit a recovery request below.</p>
+                      <button
+                        onClick={() => navigate('/recovery-request', { state: { employeeId, missingCredentials: preLoginData?.missing_credentials } })}
+                        className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium text-sm transition-colors"
+                      >
+                        Request Credential Recovery
+                      </button>
+                    </>
+                  ) : preLoginData.recovery_request.status === 'pending' ? (
+                    /* Case 2: Request pending */
+                    <>
+                      <div className="text-center py-6">
+                        <div className="h-10 w-10 rounded-full border-4 border-amber-200 border-t-amber-500 animate-spin mx-auto mb-3" />
+                        <h3 className="text-lg font-bold text-gray-800 mb-2">Request Pending</h3>
+                        <p className="text-gray-600 text-sm mb-4 px-2">
+                          Your recovery request is pending administrator approval. Please wait for confirmation.
+                        </p>
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 text-left mb-4">
+                          <strong>Type:</strong> {preLoginData.recovery_request.request_type.replace('_', ' ').toUpperCase()}
+                        </div>
+                        <button
+                          disabled
+                          className="w-full py-2.5 bg-amber-200 text-amber-500 rounded-lg font-medium text-sm cursor-not-allowed"
+                        >
+                          Request Pending Admin Approval
+                        </button>
+                      </div>
+                    </>
+                  ) : preLoginData.recovery_request.status === 'rejected' ? (
+                    /* Case 3: Request rejected */
+                    <>
+                      <FaExclamationTriangle className="mx-auto text-4xl text-red-500 mb-3 block text-center w-full" />
+                      <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Request Rejected</h3>
+                      <p className="text-gray-600 text-sm mb-4 text-center">
+                        Admin has rejected your recovery request.
+                      </p>
+                      {preLoginData.recovery_request.review_notes && (
+                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-800 text-left mb-4">
+                          <strong>Rejection Comment:</strong>
+                          <p className="mt-1 italic">"{preLoginData.recovery_request.review_notes}"</p>
+                        </div>
+                      )}
+                      <p className="text-xs text-gray-500 text-center mb-4">Please submit another recovery request or contact your administrator.</p>
+                      <button
+                        onClick={() => navigate('/recovery-request', { state: { employeeId, missingCredentials: preLoginData?.missing_credentials } })}
+                        className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium text-sm transition-colors"
+                      >
+                        Request Credential Recovery Again
+                      </button>
+                    </>
+                  ) : preLoginData.recovery_request.status === 'approved' ? (
+                    /* Case 4: Request approved */
+                    recoverySuccess ? (
+                      <div className="text-center py-6">
+                        <FaCheckCircle className="mx-auto text-5xl text-emerald-500 mb-4" />
+                        <h3 className="text-lg font-bold text-gray-800 mb-2">Setup Completed</h3>
+                        <p className="text-gray-600 text-sm mb-6">
+                          Your face has been successfully registered in the database in real-time.
+                        </p>
+                        <button
+                          onClick={() => {
+                            setStep('id_entry');
+                            setPassword('');
+                            setRecoveryFrames([]);
+                            setRecoverySuccess(false);
+                            setRecoveryError('');
+                          }}
+                          className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-lg font-semibold text-sm transition-colors"
+                        >
+                          Continue to Login
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Face Profile Enrollment</h3>
+                        <p className="text-gray-600 text-xs mb-4 text-center">
+                          Your recovery request was approved! Position your face in the camera frame to register.
+                        </p>
+
+                        {recoveryError && (
+                          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600 mb-4 text-center">
+                            {recoveryError}
+                          </div>
+                        )}
+
+                        <div className="aspect-video bg-gray-900 rounded-lg overflow-hidden mb-4 relative max-h-60 border border-gray-200">
+                          <FaceCamera
+                            onCapture={handleRecoveryFrameCapture}
+                            className="w-full h-full"
+                            autoCapture={true}
+                            captureInterval={250}
+                            showControls={false}
+                          />
+                          {recoveryFrames.length > 0 && (
+                            <div className="absolute inset-0 bg-slate-950/60 flex flex-col items-center justify-center">
+                              <div className="text-blue-400 text-lg font-bold mb-1 animate-pulse">
+                                Capturing: {recoveryFrames.length} / 15
+                              </div>
+                              <p className="text-[10px] text-slate-400">Keep looking at the camera</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Progress Bar */}
+                        <div className="mb-4">
+                          <div className="w-full bg-gray-200 rounded-full h-1.5">
+                            <div
+                              className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                              style={{ width: `${(recoveryFrames.length / 15) * 100}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex justify-between text-xs text-gray-500 mb-4">
+                          <span>Captured {recoveryFrames.length}/15 frames</span>
+                          {recoveryFrames.length > 0 && (
+                            <button
+                              onClick={() => setRecoveryFrames([])}
+                              className="text-red-500 hover:underline"
+                            >
+                              Reset
+                            </button>
+                          )}
+                        </div>
+
+                        {isRecoverySubmitting && (
+                          <div className="text-xs text-blue-500 text-center py-2 flex items-center justify-center gap-1.5">
+                            <FaSpinner className="animate-spin" /> Processing face image...
+                          </div>
+                        )}
+                      </div>
+                    )
+                  ) : (
+                    /* Other states: fallback */
+                    <>
+                      <FaExclamationTriangle className="mx-auto text-4xl text-amber-500 mb-3 block text-center w-full" />
+                      <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Credentials Missing</h3>
+                      <button
+                        onClick={() => navigate('/recovery-request', { state: { employeeId } })}
+                        className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium text-sm transition-colors"
+                      >
+                        Request Credential Recovery
+                      </button>
+                    </>
                   )}
-                  <p className="text-xs text-gray-500 text-center mb-4">Please contact your administrator to recover your credentials, or submit a recovery request below.</p>
                   <button
-                    onClick={() => navigate('/recovery-request', { state: { employeeId } })}
-                    className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium text-sm transition-colors"
-                  >
-                    Request Credential Recovery
-                  </button>
-                  <button
-                    onClick={() => { setStep('id_entry'); setPassword(''); }}
+                    onClick={() => {
+                      setStep('id_entry');
+                      setPassword('');
+                      setRecoveryFrames([]);
+                      setRecoverySuccess(false);
+                      setRecoveryError('');
+                    }}
                     className="mt-3 w-full text-gray-600 hover:text-gray-800 text-sm"
                   >← Back</button>
                 </motion.div>

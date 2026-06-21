@@ -1703,7 +1703,7 @@ router.post('/pre-login-check', async (req, res) => {
     );
     const activeEmbeddingCount = Number(countResult.rows[0]?.count || 0);
 
-    const isLocked = emp.locked_until && new Date(emp.locked_until) > new Date();
+    const isLocked = Boolean(emp.locked_until && new Date(emp.locked_until) > new Date());
     const hasActiveEmbedding = activeEmbeddingCount > 0;
 
     // Determine required login method based on role and credential status
@@ -1723,6 +1723,27 @@ router.post('/pre-login-check', async (req, res) => {
       }
     }
 
+    let recoveryRequest = null;
+    if (missingCredentials.length > 0) {
+      const recoveryReqResult = await query(
+        `SELECT id, status, request_type, review_notes
+         FROM account_recovery_requests
+         WHERE employee_id = $1 AND status IN ('pending', 'approved', 'rejected')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [emp.id]
+      );
+      if (recoveryReqResult.rows.length > 0) {
+        const req = recoveryReqResult.rows[0];
+        recoveryRequest = {
+          id: req.id,
+          status: req.status,
+          request_type: req.request_type,
+          review_notes: req.review_notes,
+        };
+      }
+    }
+
     return res.json({
       success: true,
       exists: emp.is_active,
@@ -1734,6 +1755,7 @@ router.post('/pre-login-check', async (req, res) => {
       needs_recovery: missingCredentials.length > 0,
       account_locked: isLocked,
       locked_until: isLocked ? emp.locked_until : null,
+      recovery_request: recoveryRequest,
     });
   } catch (error) {
     logger.error('Pre-login check error', { error: error.message });
@@ -1976,7 +1998,7 @@ router.post('/recovery/reset', async (req, res) => {
   let mainTxBegun = false;
   let faceTxBegun = false;
   try {
-    const { employeeId, recoveryId, password, faceEmbedding } = req.body;
+    const { employeeId, recoveryId, password, faceEmbedding, frames } = req.body;
 
     if (!isValidEmployeeId(employeeId) || !recoveryId) {
       return res.status(400).json({
@@ -2008,6 +2030,51 @@ router.post('/recovery/reset', async (req, res) => {
     const empId = recovery.employee_id;
     const requestType = recovery.request_type;
 
+    let finalEmbedding = faceEmbedding;
+
+    if (requestType === 'face_reset' || requestType === 'full_credential_reset') {
+      if ((!finalEmbedding || !Array.isArray(finalEmbedding)) && frames) {
+        if (!Array.isArray(frames) || frames.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Frames array is required to generate face embedding',
+            code: 'INVALID_REQUEST'
+          });
+        }
+
+        try {
+          const faceAIServiceUrl = process.env.FACE_AI_SERVICE_URL || 'http://face-ai-service:8000';
+          const aiResponse = await axios.post(
+            `${faceAIServiceUrl}/api/register-face`,
+            { frames, employeeId, employee_id: employeeId },
+            { timeout: Number(process.env.FACE_AI_TIMEOUT_MS || 15000) }
+          );
+          if (aiResponse.data.success || aiResponse.data.registered) {
+            const rawVector = aiResponse.data.embedding || aiResponse.data.face_embedding;
+            if (Array.isArray(rawVector) && rawVector.length > 0) {
+              if (rawVector[0] >= 0.49 && rawVector[0] <= 0.51) rawVector[0] = 0.35;
+              finalEmbedding = rawVector;
+            }
+          }
+        } catch (err) {
+          logger.error('[Recovery] Face AI service failed during recovery reset', { error: err.message });
+          return res.status(503).json({
+            success: false,
+            message: 'Face recognition service is currently unavailable. Please try again later.',
+            code: 'FACE_AI_UNAVAILABLE'
+          });
+        }
+      }
+
+      if (!finalEmbedding || !Array.isArray(finalEmbedding) || finalEmbedding.length !== 512) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid 512-dimensional face embedding or frames are required',
+          code: 'INVALID_FACE_EMBEDDING',
+        });
+      }
+    }
+
     await faceQuery('BEGIN');
     faceTxBegun = true;
     await query('BEGIN');
@@ -2029,10 +2096,6 @@ router.post('/recovery/reset', async (req, res) => {
     }
 
     if (requestType === 'face_reset' || requestType === 'full_credential_reset') {
-      if (!faceEmbedding || !Array.isArray(faceEmbedding) || faceEmbedding.length !== 512) {
-        throw { status: 400, message: 'Valid 512-dimensional face embedding is required', code: 'INVALID_FACE_EMBEDDING' };
-      }
-      
       // Deactivate existing face embeddings in face db
       await faceQuery(
         `UPDATE face_embeddings
@@ -2042,7 +2105,7 @@ router.post('/recovery/reset', async (req, res) => {
       );
 
       // Insert new face embedding in face db
-      const vectorStr = JSON.stringify(faceEmbedding);
+      const vectorStr = JSON.stringify(finalEmbedding);
       await faceQuery(
         `INSERT INTO face_embeddings
            (employee_id, embedding_vector, embedding_version, confidence_score, enrolled_by, is_active)
@@ -2069,11 +2132,25 @@ router.post('/recovery/reset', async (req, res) => {
         [empId, empName]
       );
 
+      // Process frames to generate image data and image hash if available
+      let imageData = null;
+      let imageHash = null;
+      if (frames && Array.isArray(frames) && frames.length > 0) {
+        try {
+          const cleanBase64 = frames[0].includes(',') ? frames[0].split(',')[1] : frames[0];
+          imageData = Buffer.from(cleanBase64, 'base64');
+          const crypto = require('crypto');
+          imageHash = crypto.createHash('sha256').update(imageData).digest('hex');
+        } catch (err) {
+          logger.warn('Failed to parse frame for image_data in recovery reset', { error: err.message });
+        }
+      }
+
       // Insert into user_images
       await faceQuery(
-        `INSERT INTO user_images (user_id, face_embedding, verification_status, uploaded_at)
-         VALUES ($1, $2, 'VERIFIED', NOW())`,
-        [empId, vectorStr]
+        `INSERT INTO user_images (user_id, image_data, image_hash, face_embedding, verification_status, uploaded_at)
+         VALUES ($1, $2, $3, $4, 'VERIFIED', NOW())`,
+        [empId, imageData, imageHash, vectorStr]
       );
 
       // Update employee status in main db

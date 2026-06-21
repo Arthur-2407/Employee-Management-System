@@ -7,6 +7,7 @@ import {
   FaShieldAlt, 
   FaMapMarkerAlt,
   FaCamera,
+  FaClock,
 } from 'react-icons/fa';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { attendanceApi } from '@api/attendanceApi';
@@ -217,6 +218,7 @@ const DashboardPage: React.FC = () => {
   const [faceFrames, setFaceFrames] = useState<{ data: string; timestamp: number }[]>([]);
   const [isFaceSubmitting, setIsFaceSubmitting] = useState(false);
   const [faceEnrolled, setFaceEnrolled] = useState<boolean>((user as any)?.faceEnrolled || false);
+  const [pendingFaceRequest, setPendingFaceRequest] = useState<any>(null);
 
   useEffect(() => {
     if (user) {
@@ -251,13 +253,15 @@ const DashboardPage: React.FC = () => {
         frames: faceFrames.map(f => f.data),
       });
 
-      if (response.data.success) {
+        if (response.data.success) {
         if (response.data.instant) {
           showSuccess('Face profile registered instantly!');
           setFaceEnrolled(true);
           await refreshUser();
         } else {
           showSuccess('Face change request submitted successfully and is pending approval.');
+          const abortController = new AbortController();
+          fetchDashboardData(abortController.signal);
         }
         setIsFaceModalOpen(false);
         setFaceFrames([]);
@@ -366,6 +370,29 @@ const DashboardPage: React.FC = () => {
         }
       });
 
+    const pendingFacePromise = faceManagementApi.getPendingRequests()
+      .then(async (resp) => {
+        if (!signal.aborted && resp.data?.success) {
+          const pending = resp.data.data.find((r: any) => r.status === 'PENDING');
+          setPendingFaceRequest(pending || null);
+          // If there's no longer a pending request but faceEnrolled is still false,
+          // a previously pending request may have been approved and applied.
+          // Refresh user data to pick up the updated face_enrolled status from the server.
+          if (!pending && !((user as any)?.faceEnrolled)) {
+            try {
+              await refreshUser();
+            } catch {
+              // Non-fatal — face enrolled state will sync on next token refresh
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        if (err?.name !== 'CanceledError' && !signal.aborted) {
+          console.error('Pending face requests fetch error:', err);
+        }
+      });
+
     // STABILIZATION: All fetches run in parallel — one failure doesn't block others
     await Promise.allSettled([
       statsPromise,
@@ -373,7 +400,8 @@ const DashboardPage: React.FC = () => {
       locationPromise,
       todayPromise,
       fullHistoryPromise,
-      timingPromise
+      timingPromise,
+      pendingFacePromise
     ]);
   };
 
@@ -1099,16 +1127,26 @@ const DashboardPage: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => {
-                  setFaceFrames([]);
-                  setIsFaceModalOpen(true);
-                }}
-                className="w-full flex items-center justify-center px-4 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white rounded-lg transition-colors font-medium"
-              >
-                <FaCamera className="mr-2" />
-                {faceEnrolled ? (user?.role === 'admin' ? 'Update Face Profile' : 'Request Face Update') : 'Enroll Face Profile'}
-              </button>
+              {pendingFaceRequest ? (
+                <div className="w-full bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800 flex flex-col items-center text-center gap-1.5">
+                  <FaClock className="text-amber-500 text-lg flex-shrink-0" />
+                  <span className="font-semibold text-xs uppercase tracking-wider text-amber-600">Pending Approval</span>
+                  <span className="text-xs text-gray-600">
+                    Face signature is stored and pending admin confirmation. You will be able to verify & sign in using face once approved.
+                  </span>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setFaceFrames([]);
+                    setIsFaceModalOpen(true);
+                  }}
+                  className="w-full flex items-center justify-center px-4 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white rounded-lg transition-colors font-medium animate-pulse-slow"
+                >
+                  <FaCamera className="mr-2" />
+                  {faceEnrolled ? (user?.role === 'admin' ? 'Update Face Profile' : 'Request Face Update') : 'Enroll Face Profile'}
+                </button>
+              )}
             </div>
 
             {/* Geo-fence Compliance */}

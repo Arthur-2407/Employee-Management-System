@@ -10,9 +10,20 @@ const RecoveryRequestPage: React.FC = () => {
   
   // Try to pre-fill the employeeId from location state
   const stateEmployeeId = location.state?.employeeId || '';
+  const stateMissingCredentials: string[] = location.state?.missingCredentials || [];
+
+  // Auto-detect the most appropriate recovery type from missingCredentials
+  const detectRequestType = () => {
+    const hasFace = stateMissingCredentials.includes('face');
+    const hasPassword = stateMissingCredentials.includes('password');
+    if (hasFace && hasPassword) return 'full_credential_reset';
+    if (hasFace) return 'face_reset';
+    if (hasPassword) return 'password_reset';
+    return 'password_reset'; // default
+  };
 
   const [employeeId, setEmployeeId] = useState(stateEmployeeId);
-  const [requestType, setRequestType] = useState('password_reset');
+  const [requestType, setRequestType] = useState(detectRequestType());
   const [reason, setReason] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
