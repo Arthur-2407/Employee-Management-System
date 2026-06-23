@@ -407,7 +407,7 @@ AE[Terraform Infrastructure] --> AC
 ### Clone Repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/Arthur-2407/Employee-Management-System.git
 cd Website
 ```
 
