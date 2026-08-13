@@ -49,10 +49,12 @@ orchestration-report.json
 .bundle-baseline.json
 .state-integrity.json
 .state-snapshots/
+
+# Local operational backups, recovery snapshots, and repair state
 backups/
 backups/**
-backups/.env.backup
-*/.env.backup
+**/.env.backup
+*.env.backup
 
 # Development, repair, testing, and internal artifact directories/files
 .ai-workspace/
