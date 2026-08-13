@@ -50,6 +50,20 @@ orchestration-report.json
 .state-integrity.json
 .state-snapshots/
 backups/
+backups/.env.backup
+
+# Development, repair, testing, and internal artifact directories/files
+.ai-workspace/
+checkpoints/
+REPAIR_STATE.json
+repair-manifest.json
+rollback-map.json
+auto-repair-monitor.ps1
+test_*.js
+test_*.json
+synthetic_frames.json
+temp_payload.json
+admin_jwt.txt
 
 # AI progress tracker — large auto-generated files, not needed in VCS
 .ai-progress/
